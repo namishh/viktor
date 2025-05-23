@@ -1,8 +1,8 @@
 // man this is getting out of hand
 const std = @import("std");
 
-const MAX_KEYS_PER_PAGE = 1024;
-const PAGE_SIZE = 64 * 1024;
+const MAX_KEYS_PER_PAGE = 4096;
+const PAGE_SIZE = 64 * 4096;
 
 const DatabaseError = error{ KeyExists, NotFound, InvalidDataType, InvalidDatabase, InvalidTransaction, InvalidSize };
 
@@ -14,7 +14,7 @@ pub fn Value(comptime T: type) type {
 
         pub fn convertToBytes(self: *const Self, allocator: *const std.mem.Allocator) ![]u8 {
             return switch (@typeInfo(T)) {
-                .int, .float => {
+                .int, .float, .comptime_int, .comptime_float => {
                     const bytes = try allocator.alloc(u8, @sizeOf(T));
                     std.mem.writeInt(std.meta.Int(.unsigned, @sizeOf(T) * 8), bytes[0..@sizeOf(T)], @bitCast(self.data), .little);
                     return bytes;
@@ -33,13 +33,29 @@ pub fn Value(comptime T: type) type {
                         return bytes;
                     }
                 },
-                else => {
-                    return error.InvalidDataType;
+                .@"struct" => {
+                    const bytes = try allocator.alloc(u8, @sizeOf(T));
+                    @memcpy(bytes, std.mem.asBytes(&self.data));
+                    return bytes;
                 },
+                .pointer => |info| {
+                    if (info.child == u8 and info.size == .slice) {
+                        return try allocator.dupe(u8, self.data);
+                    } else if (info.size == .Slice) {
+                        const total_size = self.data.len * @sizeOf(info.child);
+                        const bytes = try allocator.alloc(u8, @sizeOf(usize) + total_size);
+                        std.mem.writeInt(usize, bytes[0..@sizeOf(usize)], self.data.len, .little);
+                        @memcpy(bytes[@sizeOf(usize)..], std.mem.sliceAsBytes(self.data));
+                        return bytes;
+                    } else {
+                        return DatabaseError.InvalidDataType;
+                    }
+                },
+                else => DatabaseError.InvalidDataType,
             };
         }
 
-        pub fn fromBytes(bytes: []const u8) !Self {
+        pub fn fromBytes(bytes: []const u8, allocator: std.mem.Allocator) !Self {
             return switch (@typeInfo(T)) {
                 .int, .float, .comptime_int, .comptime_float => {
                     if (bytes.len != @sizeOf(T)) return error.InvalidSize;
@@ -63,9 +79,29 @@ pub fn Value(comptime T: type) type {
                         return Self{ .data = data };
                     }
                 },
-                else => {
-                    return error.InvalidDataType;
+                .pointer => |info| {
+                    if (info.child == u8 and info.size == .slice) {
+                        return Self{ .data = try allocator.dupe(u8, bytes) };
+                    } else if (info.size == .Slice) {
+                        if (bytes.len < @sizeOf(usize)) return DatabaseError.InvalidDataType;
+                        const len = std.mem.readInt(usize, bytes[0..@sizeOf(usize)], .little);
+                        const element_size = @sizeOf(info.child);
+                        if (bytes.len != @sizeOf(usize) + len * element_size) return DatabaseError.InvalidDataType;
+
+                        const slice_bytes = bytes[@sizeOf(usize)..];
+                        const typed_slice = std.mem.bytesAsSlice(info.child, slice_bytes);
+                        return Self{ .data = try allocator.dupe(info.child, typed_slice) };
+                    } else {
+                        return DatabaseError.InvalidDataType;
+                    }
                 },
+                .@"struct" => {
+                    if (bytes.len != @sizeOf(T)) return DatabaseError.InvalidDataType;
+                    var data: T = undefined;
+                    @memcpy(std.mem.asBytes(&data), bytes);
+                    return Self{ .data = data };
+                },
+                else => DatabaseError.InvalidDataType,
             };
         }
     };
@@ -265,7 +301,7 @@ pub const Database = struct {
     pub fn getTyped(self: *Self, comptime T: type, txn: *Transaction, key: []const u8) !?Value(T) {
         const value = try self.get(txn, key);
         if (value) |v| {
-            const va = try Value(T).fromBytes(v);
+            const va = try Value(T).fromBytes(v, self.allocator);
             return va;
         }
         return null;
