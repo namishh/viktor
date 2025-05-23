@@ -4,7 +4,7 @@ const std = @import("std");
 const MAX_KEYS_PER_PAGE = 4096;
 const PAGE_SIZE = 64 * 4096;
 
-const DatabaseError = error{ KeyExists, NotFound, InvalidDataType, InvalidDatabase, InvalidTransaction, InvalidSize };
+const DatabaseError = error{ KeyExists, NotFound, InvalidDataType, InvalidDatabase, InvalidTransaction, InvalidSize, TransactionNotActive, InvalidKey };
 
 // comptime struct for storing a value
 pub fn Value(comptime T: type) type {
@@ -213,12 +213,23 @@ const Page = struct {
 
 const TransactionType = enum { ReadOnly, WriteOnly, ReadWrite };
 
+const TransactionState = enum { Active, Committed, Aborted };
+
+const UndoEntry = struct {
+    operation: enum { Insert, Update, Delete },
+    table_name: []const u8,
+    key: []const u8,
+    old_value: ?[]const u8,
+};
+
 pub const Transaction = struct {
     id: u32,
     txn_type: TransactionType,
     dirty_pages: std.ArrayList(u32),
     allocator: std.mem.Allocator,
     is_active: bool,
+    state: TransactionState = .Active,
+    undo_log: std.ArrayList(UndoEntry),
 
     const Self = @This();
 
@@ -228,6 +239,7 @@ pub const Transaction = struct {
             .txn_type = tx_type,
             .dirty_pages = std.ArrayList(u32).init(allocator),
             .allocator = allocator,
+            .undo_log = std.ArrayList(UndoEntry).init(allocator),
             .is_active = true,
         };
     }
@@ -238,16 +250,16 @@ pub const Transaction = struct {
     }
 
     pub fn commit(self: *Self) !void {
-        if (!self.is_active) return DatabaseError.InvalidTransaction;
-        // In a real implementation, this would flush dirty pages to disk
-        self.dirty_pages.clearRetainingCapacity();
+        if (self.state != .active) return DatabaseError.TransactionNotActive;
+
+        self.state = .Committed;
+        self.undo_log.clearAndFree();
     }
 
     pub fn abort(self: *Self) !void {
-        if (!self.is_active) return DatabaseError.InvalidTransaction;
-        // In a real implementation, this would revert dirty pages
-        self.dirty_pages.clearRetainingCapacity();
-        self.is_active = false;
+        if (self.state != .Active) return DatabaseError.TransactionNotActive;
+
+        self.state = .Aborted;
     }
 };
 
@@ -413,11 +425,34 @@ const Environment = struct {
         _ = self.transactions.remove(txn_id);
     }
 
-    pub fn abort_txn(self: *Self, txn_id: u32) !void {
-        var txn = try self.get_txn(txn_id);
-        try txn.abort();
-        txn.deinit();
-        _ = self.transactions.remove(txn_id);
+    pub fn abort_txn(self: *Self, txn: *Transaction, db_id: u32) !void {
+        if (txn.state != .Active) return DatabaseError.TransactionNotActive;
+
+        var i = txn.undo_log.items.len;
+        const db = self.databases.getPtr(db_id) orelse return DatabaseError.InvalidDatabase;
+        while (i > 0) {
+            i -= 1;
+            const entry = txn.undo_log.items[i];
+
+            switch (entry.operation) {
+                .Insert => {
+                    try db.delete(txn, entry.key);
+                },
+                .Update => {
+                    if (entry.old_value) |old_val| {
+                        try db.put(txn, entry.key, old_val);
+                    }
+                },
+                .Delete => {
+                    if (entry.old_value) |old_val| {
+                        try db.put(txn, entry.key, old_val);
+                    }
+                },
+            }
+        }
+
+        txn.state = .Aborted;
+        txn.undo_log.clearAndFree();
     }
 };
 
@@ -433,7 +468,7 @@ test "Basic DATABASE" {
     const db = try env.get_db(db_id);
     const txn_id = try env.begin_txn(.ReadWrite);
     const txn = try env.get_txn(txn_id);
-    defer env.abort_txn(txn_id) catch |err| {
+    defer env.abort_txn(txn, db_id) catch |err| {
         std.debug.print("Failed to abort transaction: {}\n", .{err});
     };
     try db.putTyped(u64, txn, "int_key", 12345678901234, allocator);
