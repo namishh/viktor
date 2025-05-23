@@ -1,6 +1,9 @@
 // man this is getting out of hand
 const std = @import("std");
 
+const MAX_KEYS_PER_PAGE = 1024;
+const PAGE_SIZE = 64 * 1024;
+
 const DatabaseError = error{ KeyExists, NotFound, InvalidDataType, InvalidDatabase, InvalidTransaction, InvalidSize };
 
 // comptime struct for storing a value
@@ -9,7 +12,7 @@ pub fn Value(comptime T: type) type {
         data: T,
         const Self = @This();
 
-        pub fn convertToBytes(self: *const Self, allocator: *std.mem.Allocator) ![]u8 {
+        pub fn convertToBytes(self: *const Self, allocator: *const std.mem.Allocator) ![]u8 {
             return switch (@typeInfo(T)) {
                 .int, .float => {
                     const bytes = try allocator.alloc(u8, @sizeOf(T));
@@ -21,7 +24,7 @@ pub fn Value(comptime T: type) type {
                     bytes[0] = if (self.data) 1 else 0;
                     return bytes;
                 },
-                .Array => |info| {
+                .array => |info| {
                     if (info.child == u8) {
                         return try allocator.dupe(u8, &self.data);
                     } else {
@@ -30,12 +33,15 @@ pub fn Value(comptime T: type) type {
                         return bytes;
                     }
                 },
+                else => {
+                    return error.InvalidDataType;
+                },
             };
         }
 
         pub fn fromBytes(bytes: []const u8) !Self {
             return switch (@typeInfo(T)) {
-                .int, .float => {
+                .int, .float, .comptime_int, .comptime_float => {
                     if (bytes.len != @sizeOf(T)) return error.InvalidSize;
                     const int_val = std.mem.readInt(std.meta.Int(.unsigned, @sizeOf(T) * 8), bytes[0..@sizeOf(T)], .little);
                     return Self{ .data = @bitCast(int_val) };
@@ -44,7 +50,7 @@ pub fn Value(comptime T: type) type {
                     if (bytes.len != 1) return error.InvalidSize;
                     return Self{ .data = bytes[0] != 0 };
                 },
-                .Array => |info| {
+                .array => |info| {
                     if (info.child == u8) {
                         if (bytes.len != info.len) return DatabaseError.InvalidDataType;
                         var arr: T = undefined;
@@ -56,6 +62,9 @@ pub fn Value(comptime T: type) type {
                         @memcpy(std.mem.asBytes(&data), bytes);
                         return Self{ .data = data };
                     }
+                },
+                else => {
+                    return error.InvalidDataType;
                 },
             };
         }
@@ -82,26 +91,45 @@ const Page = struct {
     header: PageHeader,
     keys: [][]const u8,
     values: [][]const u8,
-    children: [][]u32,
+    children: []u32,
     data: []u8,
 
     const Self = @This();
 
-    pub fn init(page_id: u32, is_leaf: bool) Self {
+    pub fn init(allocator: std.mem.Allocator, page_id: u32, is_leaf: bool) !Self {
+        const keys = try allocator.alloc([]const u8, MAX_KEYS_PER_PAGE);
+        const values = try allocator.alloc([]const u8, MAX_KEYS_PER_PAGE);
+        const children = try allocator.alloc(u32, MAX_KEYS_PER_PAGE + 1);
+        const data = try allocator.alloc(u8, PAGE_SIZE);
+
         return Self{
             .header = PageHeader{
                 .page_id = page_id,
                 .parent_id = 0,
                 .is_leaf = is_leaf,
                 .key_count = 0,
-                .next_page = 0,
-                .prev_page = 0,
+                .next = 0,
+                .prev = 0,
             },
-            .keys = std.mem.zeroes([][]const u8),
-            .values = std.mem.zeroes([][]const u8),
-            .children = std.mem.zeroes([]u32),
-            .data = std.mem.zeroes([]u8),
+            .keys = keys,
+            .values = values,
+            .children = children,
+            .data = data,
         };
+    }
+
+    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        for (self.keys[0..self.header.key_count]) |key| {
+            allocator.free(key);
+        }
+        for (self.values[0..self.header.key_count]) |value| {
+            allocator.free(value);
+        }
+
+        allocator.free(self.keys);
+        allocator.free(self.values);
+        allocator.free(self.children);
+        allocator.free(self.data);
     }
 
     pub fn search(self: *const Self, key: []const u8) ?usize {
@@ -158,7 +186,7 @@ pub const Transaction = struct {
 
     const Self = @This();
 
-    pub fn init(allocator: std.meme.Allocator, id: u32, tx_type: TransactionType) Self {
+    pub fn init(allocator: std.mem.Allocator, id: u32, tx_type: TransactionType) Self {
         return Self{
             .id = id,
             .txn_type = tx_type,
@@ -200,7 +228,7 @@ pub const Database = struct {
     pub fn init(allocator: std.mem.Allocator, id: u32, name: []const u8) !Self {
         var pages = std.HashMap(u32, Page, std.hash_map.AutoContext(u32), std.hash_map.default_max_load_percentage).init(allocator);
 
-        const root_page = Page.init(1, true);
+        const root_page = try Page.init(allocator, 1, true);
         try pages.put(1, root_page);
 
         return Self{
@@ -215,6 +243,12 @@ pub const Database = struct {
 
     pub fn deinit(self: *Self) void {
         self.allocator.free(self.name);
+
+        var page_iter = self.pages.iterator();
+        while (page_iter.next()) |entry| {
+            entry.value_ptr.deinit(self.allocator);
+        }
+
         self.pages.deinit();
     }
 
@@ -231,7 +265,8 @@ pub const Database = struct {
     pub fn getTyped(self: *Self, comptime T: type, txn: *Transaction, key: []const u8) !?Value(T) {
         const value = try self.get(txn, key);
         if (value) |v| {
-            return Value(T).fromBytes(v);
+            const va = try Value(T).fromBytes(v);
+            return va;
         }
         return null;
     }
@@ -242,13 +277,13 @@ pub const Database = struct {
 
         var root_page = self.pages.getPtr(self.root_page) orelse return DatabaseError.InvalidDatabase;
 
-        try root_page.insert(self.allocator, key, value);
+        try root_page.insert(&self.allocator, key, value);
         try txn.dirty_pages.append(self.root_page);
     }
 
     pub fn putTyped(self: *Self, comptime T: type, txn: *Transaction, key: []const u8, value: T, allocator: std.mem.Allocator) !void {
         const value_wrapper = Value(T){ .data = value };
-        const bytes = try value_wrapper.toBytes(allocator);
+        const bytes = try value_wrapper.convertToBytes(&allocator);
         defer allocator.free(bytes);
         try self.put(txn, key, bytes);
     }
@@ -307,7 +342,7 @@ const Environment = struct {
         self.transactions.deinit();
     }
 
-    pub fn open(self: *Self, name: []const u8) !Database {
+    pub fn open(self: *Self, name: []const u8) !u32 {
         const db_id = self.next_db_id;
         self.next_db_id += 1;
 
@@ -357,4 +392,20 @@ test "Basic DATABASE" {
 
     var env = try Environment.init(allocator);
     defer env.deinit();
+
+    const db_id = try env.open("test_db");
+    const db = try env.get_db(db_id);
+    const txn_id = try env.begin_txn(.ReadWrite);
+    const txn = try env.get_txn(txn_id);
+    defer env.abort_txn(txn_id) catch |err| {
+        std.debug.print("Failed to abort transaction: {}\n", .{err});
+    };
+    try db.putTyped(u64, txn, "int_key", 12345678901234, allocator);
+
+    const result = try db.getTyped(u64, txn, "int_key");
+    if (result) |value| {
+        std.debug.print("Value: {}\n", .{value.data});
+    } else {
+        std.debug.print("Key not found\n", .{});
+    }
 }
