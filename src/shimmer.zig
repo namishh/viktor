@@ -246,6 +246,7 @@ pub const Transaction = struct {
 
     pub fn deinit(self: *Self) void {
         for (self.undo_log.items) |entry| {
+            self.allocator.free(entry.table_name);
             self.allocator.free(entry.key);
             if (entry.old_value) |old_val| {
                 self.allocator.free(old_val);
@@ -261,6 +262,7 @@ pub const Transaction = struct {
         if (self.state != .Active) return DatabaseError.TransactionNotActive;
 
         for (self.undo_log.items) |entry| {
+            self.allocator.free(entry.table_name);
             self.allocator.free(entry.key);
             if (entry.old_value) |old_val| {
                 self.allocator.free(old_val);
@@ -275,6 +277,7 @@ pub const Transaction = struct {
         if (self.state != .Active) return DatabaseError.TransactionNotActive;
 
         for (self.undo_log.items) |entry| {
+            self.allocator.free(entry.table_name);
             self.allocator.free(entry.key);
             if (entry.old_value) |old_val| {
                 self.allocator.free(old_val);
@@ -348,6 +351,27 @@ pub const Database = struct {
 
         var root_page = self.pages.getPtr(self.root_page) orelse return DatabaseError.InvalidDatabase;
 
+        const existing_value = if (root_page.search(key)) |idx|
+            try self.allocator.dupe(u8, root_page.values[idx])
+        else
+            null;
+
+        if (existing_value) |old_val| {
+            try txn.undo_log.append(UndoEntry{
+                .operation = .Update,
+                .table_name = try self.allocator.dupe(u8, "default"),
+                .key = try self.allocator.dupe(u8, key),
+                .old_value = old_val,
+            });
+        } else {
+            try txn.undo_log.append(UndoEntry{
+                .operation = .Insert,
+                .table_name = try self.allocator.dupe(u8, "default"),
+                .key = try self.allocator.dupe(u8, key),
+                .old_value = null,
+            });
+        }
+
         try root_page.insert(&self.allocator, key, value);
         try txn.dirty_pages.append(self.root_page);
     }
@@ -366,6 +390,13 @@ pub const Database = struct {
         var root_page = self.pages.getPtr(self.root_page) orelse return DatabaseError.InvalidDatabase;
 
         if (root_page.search(key)) |index| {
+            try txn.undo_log.append(UndoEntry{
+                .operation = .Delete,
+                .table_name = try self.allocator.dupe(u8, "default"),
+                .key = try self.allocator.dupe(u8, key),
+                .old_value = try self.allocator.dupe(u8, root_page.values[index]),
+            });
+
             self.allocator.free(root_page.keys[index]);
             self.allocator.free(root_page.values[index]);
 
@@ -454,31 +485,61 @@ const Environment = struct {
     pub fn abort_txn(self: *Self, txn: *Transaction, db_id: u32) !void {
         if (txn.state != .Active) return DatabaseError.TransactionNotActive;
 
-        var i = txn.undo_log.items.len;
         const db = self.databases.getPtr(db_id) orelse return DatabaseError.InvalidDatabase;
-        while (i > 0) {
-            i -= 1;
-            const entry = txn.undo_log.items[i];
+        var root_page = db.pages.getPtr(db.root_page) orelse return DatabaseError.InvalidDatabase;
 
+        while (txn.undo_log.pop()) |entry| {
             switch (entry.operation) {
                 .Insert => {
-                    try db.delete(txn, entry.key);
+                    if (root_page.search(entry.key)) |index| {
+                        self.allocator.free(root_page.keys[index]);
+                        self.allocator.free(root_page.values[index]);
+                        var j = index;
+                        while (j < root_page.header.key_count - 1) {
+                            root_page.keys[j] = root_page.keys[j + 1];
+                            root_page.values[j] = root_page.values[j + 1];
+                            j += 1;
+                        }
+                        root_page.header.key_count -= 1;
+                    }
                 },
                 .Update => {
                     if (entry.old_value) |old_val| {
-                        try db.put(txn, entry.key, old_val);
+                        if (root_page.search(entry.key)) |index| {
+                            self.allocator.free(root_page.values[index]);
+                            root_page.values[index] = try self.allocator.dupe(u8, old_val);
+                        }
                     }
                 },
                 .Delete => {
                     if (entry.old_value) |old_val| {
-                        try db.put(txn, entry.key, old_val);
+                        var pos: usize = 0;
+                        while (pos < root_page.header.key_count) {
+                            const cmp = std.mem.order(u8, root_page.keys[pos], entry.key);
+                            if (cmp == .gt) break;
+                            pos += 1;
+                        }
+                        var j = root_page.header.key_count;
+                        while (j > pos) {
+                            root_page.keys[j] = root_page.keys[j - 1];
+                            root_page.values[j] = root_page.values[j - 1];
+                            j -= 1;
+                        }
+                        root_page.keys[pos] = try self.allocator.dupe(u8, entry.key);
+                        root_page.values[pos] = try self.allocator.dupe(u8, old_val);
+                        root_page.header.key_count += 1;
                     }
                 },
+            }
+
+            self.allocator.free(entry.table_name);
+            self.allocator.free(entry.key);
+            if (entry.old_value) |old_val| {
+                self.allocator.free(old_val);
             }
         }
 
         txn.state = .Aborted;
-        txn.undo_log.clearAndFree();
     }
 };
 
@@ -767,51 +828,49 @@ test "Transaction: Basic abort functionality" {
     try expectEqual(TransactionState.Aborted, txn.state);
 }
 
-// test "Transaction: Undo insert operation" {
-//     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-//     defer _ = gpa.deinit();
-//     const allocator = gpa.allocator();
+test "Transaction: Undo insert operation" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
 
-//     var env = try setupTestEnvironment(allocator);
-//     defer env.deinit();
+    var env = try setupTestEnvironment(allocator);
+    defer env.deinit();
 
-//     const db_id = try env.open("undo_insert_db");
-//     const db = try env.get_db(db_id);
+    const db_id = try env.open("undo_insert_db");
+    const db = try env.get_db(db_id);
 
-//     const setup_txn_id = try env.begin_txn(.ReadWrite);
-//     const setup_txn = try env.get_txn(setup_txn_id);
-//     try db.putTyped(i32, setup_txn, "existing", 100, allocator);
-//     try env.commit_txn(setup_txn_id);
+    const setup_txn_id = try env.begin_txn(.ReadWrite);
+    const setup_txn = try env.get_txn(setup_txn_id);
+    try db.putTyped(i32, setup_txn, "existing", 100, allocator);
+    try env.commit_txn(setup_txn_id);
 
-//     const undo_txn_id = try env.begin_txn(.ReadWrite);
-//     const undo_txn = try env.get_txn(undo_txn_id);
+    const undo_txn_id = try env.begin_txn(.ReadWrite);
+    const undo_txn = try env.get_txn(undo_txn_id);
 
-//     const undo_key = try allocator.dupe(u8, "undo_key");
-//     try undo_txn.undo_log.append(UndoEntry{
-//         .operation = .Insert,
-//         .table_name = "test",
-//         .key = undo_key,
-//         .old_value = null,
-//     });
+    try db.putTyped(i32, undo_txn, "undo_key", 999, allocator);
 
-//     try db.putTyped(i32, undo_txn, "undo_key", 999, allocator);
+    const before_undo = try db.getTyped(i32, undo_txn, "undo_key");
+    try expect(before_undo != null);
+    try expectEqual(@as(i32, 999), before_undo.?.data);
 
-//     const before_undo = try db.getTyped(i32, undo_txn, "undo_key");
-//     try expect(before_undo != null);
+    try env.abort_txn(undo_txn, db_id);
+    undo_txn.deinit();
+    _ = env.transactions.remove(undo_txn_id);
 
-//     try env.abort_txn(undo_txn, db_id);
+    const check_txn_id = try env.begin_txn(.ReadOnly);
+    const check_txn = try env.get_txn(check_txn_id);
+    defer {
+        check_txn.deinit();
+        _ = env.transactions.remove(check_txn_id);
+    }
 
-//     const check_txn_id = try env.begin_txn(.ReadOnly);
-//     const check_txn = try env.get_txn(check_txn_id);
-//     defer {
-//         check_txn.deinit();
-//         _ = env.transactions.remove(check_txn_id);
-//     }
+    const existing_result = try db.getTyped(i32, check_txn, "existing");
+    try expect(existing_result != null);
+    try expectEqual(@as(i32, 100), existing_result.?.data);
 
-//     const existing_result = try db.getTyped(i32, check_txn, "existing");
-//     try expect(existing_result != null);
-//     try expectEqual(@as(i32, 100), existing_result.?.data);
-// }
+    const undone_result = try db.getTyped(i32, check_txn, "undo_key");
+    try expect(undone_result == null);
+}
 
 test "Database: Delete non-existent key" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
