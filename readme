@@ -7,3 +7,4 @@ todo
 - [x] test the keyvalue db rigourously
 - [x] isolate keyval and processing into seperate modules
 - [x] better serialization of Value type
+- [x] make immutablility opt in

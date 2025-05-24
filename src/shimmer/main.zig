@@ -349,10 +349,15 @@ pub const Database = struct {
     root_page: u32,
     pages: std.HashMap(u32, Page, std.hash_map.AutoContext(u32), std.hash_map.default_max_load_percentage),
     next_page_id: u32,
+    immutable: bool = true,
     disk_config: DiskConfig = .{},
     allocator: std.mem.Allocator,
 
     const Self = @This();
+
+    pub fn setImmutable(self: *Self, immutable: bool) void {
+        self.immutable = immutable;
+    }
 
     pub fn init(allocator: std.mem.Allocator, id: u32, name: []const u8) !Self {
         var pages = std.HashMap(u32, Page, std.hash_map.AutoContext(u32), std.hash_map.default_max_load_percentage).init(allocator);
@@ -524,6 +529,10 @@ pub const Database = struct {
         if (txn.txn_type == .ReadOnly) return DatabaseError.InvalidTransaction;
 
         var root_page = self.pages.getPtr(self.root_page) orelse return DatabaseError.InvalidDatabase;
+
+        if (self.immutable and root_page.search(key) != null) {
+            return DatabaseError.KeyExists;
+        }
 
         const existing_value = if (root_page.search(key)) |idx|
             try self.allocator.dupe(u8, root_page.values[idx])

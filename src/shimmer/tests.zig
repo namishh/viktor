@@ -418,3 +418,61 @@ test "Persistence: Basic save and load" {
         try expectEqual(@as(f64, 3.14159), result3.?.data);
     }
 }
+
+test "immutable database behavior" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var env = try Environment.init(allocator);
+    defer env.deinit();
+
+    const db_id = try env.open("test_db");
+    var db = try env.get_db(db_id);
+
+    // test 1: immutable database (default) should reject duplicate keys
+    {
+        const txn_id = try env.begin_txn(.ReadWrite);
+        const txn = try env.get_txn(txn_id);
+
+        try db.put(txn, "key1", "value1");
+
+        const result = db.put(txn, "key1", "value2");
+        try testing.expectError(DatabaseError.KeyExists, result);
+
+        try env.commit_txn(txn_id);
+    }
+
+    // test 2: mutable database should allow duplicate keys (updates)
+    {
+        db.setImmutable(false);
+
+        const txn_id = try env.begin_txn(.ReadWrite);
+        const txn = try env.get_txn(txn_id);
+
+        try db.put(txn, "key2", "value2");
+
+        try db.put(txn, "key2", "updated_value2");
+
+        const retrieved = try db.get(txn, "key2");
+        try testing.expect(retrieved != null);
+        try testing.expectEqualStrings("updated_value2", retrieved.?);
+
+        try env.commit_txn(txn_id);
+    }
+
+    // test 3: switch back to immutable and test again
+    {
+        db.setImmutable(true);
+
+        const txn_id = try env.begin_txn(.ReadWrite);
+        const txn = try env.get_txn(txn_id);
+
+        try db.put(txn, "key3", "value3");
+
+        const result = db.put(txn, "key3", "new_value3");
+        try testing.expectError(DatabaseError.KeyExists, result);
+
+        try env.commit_txn(txn_id);
+    }
+}
