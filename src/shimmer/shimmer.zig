@@ -1,107 +1,135 @@
 // shimmer - a very simple key value store
 const std = @import("std");
 
-pub const MAX_KEYS_PER_PAGE = 4096;
-pub const PAGE_SIZE = 64 * 4096;
+pub const MAX_KEYS_PER_PAGE = 8192;
+pub const PAGE_SIZE = 64 * 8192;
 
-pub const DatabaseError = error{ KeyExists, NotFound, InvalidDataType, InvalidDatabase, InvalidTransaction, InvalidSize, TransactionNotActive, InvalidKey };
+pub const DatabaseError = error{ KeyExists, NotFound, DiskWriteError, InvalidDataType, InvalidDatabase, InvalidTransaction, InvalidSize, TransactionNotActive, InvalidKey };
+
+// serialization code taken from https://github.com/ziglibs/s2s/
+
+fn AlignedInt(comptime T: type) type {
+    return std.math.ByteAlignedInt(T);
+}
 
 pub fn Value(comptime T: type) type {
     return struct {
         data: T,
         const Self = @This();
 
+        fn serializeRecursive(stream: anytype, comptime T2: type, value: T2) @TypeOf(stream).Error!void {
+            switch (@typeInfo(T2)) {
+                .void => {},
+                .bool => try stream.writeByte(@intFromBool(value)),
+                .float => switch (T2) {
+                    f16 => try stream.writeInt(u16, @bitCast(value), .little),
+                    f32 => try stream.writeInt(u32, @bitCast(value), .little),
+                    f64 => try stream.writeInt(u64, @bitCast(value), .little),
+                    f80 => try stream.writeInt(u80, @bitCast(value), .little),
+                    f128 => try stream.writeInt(u128, @bitCast(value), .little),
+                    else => unreachable,
+                },
+                .int => {
+                    if (T2 == usize) {
+                        try stream.writeInt(u64, value, .little);
+                    } else {
+                        try stream.writeInt(AlignedInt(T), value, .little);
+                    }
+                },
+                .pointer => |ptr| {
+                    switch (ptr.size) {
+                        .one => try serializeRecursive(stream, ptr.child, value.*),
+                        .slice => {
+                            try stream.writeInt(u64, value.len, .little);
+                            if (ptr.child == u8) {
+                                try stream.writeAll(value);
+                            } else {
+                                for (value) |item| {
+                                    try serializeRecursive(stream, ptr.child, item);
+                                }
+                            }
+                        },
+                        .c => unreachable,
+                        .many => unreachable,
+                    }
+                },
+                .@"struct" => |str| {
+                    inline for (str.fields) |fld| {
+                        try serializeRecursive(stream, fld.type, @field(value, fld.name));
+                    }
+                },
+                else => return DatabaseError.InvalidDataType,
+            }
+        }
+
+        fn recursiveDeserialize(
+            stream: anytype,
+            comptime T2: type,
+            allocator: ?std.mem.Allocator,
+            target: *T2,
+        ) (@TypeOf(stream).Error || error{ UnexpectedData, OutOfMemory, EndOfStream })!void {
+            switch (@typeInfo(T2)) {
+                .void => target.* = {},
+                .bool => target.* = (try stream.readByte()) != 0,
+                .float => target.* = @bitCast(switch (T2) {
+                    f16 => try stream.readInt(u16, .little),
+                    f32 => try stream.readInt(u32, .little),
+                    f64 => try stream.readInt(u64, .little),
+                    f80 => try stream.readInt(u80, .little),
+                    f128 => try stream.readInt(u128, .little),
+                    else => unreachable,
+                }),
+                .int => target.* = if (T2 == usize)
+                    std.math.cast(usize, try stream.readInt(u64, .little)) orelse return error.UnexpectedData
+                else
+                    @truncate(try stream.readInt(AlignedInt(T2), .little)),
+                .pointer => |ptr| {
+                    switch (ptr.size) {
+                        .one => {
+                            const pointer = try allocator.?.create(ptr.child);
+                            errdefer allocator.?.destroy(pointer);
+                            try recursiveDeserialize(stream, ptr.child, allocator, pointer);
+                            target.* = pointer;
+                        },
+                        .slice => {
+                            const length = std.math.cast(usize, try stream.readInt(u64, .little)) orelse return error.UnexpectedData;
+                            const slice = try allocator.?.alloc(ptr.child, length);
+                            errdefer allocator.?.free(slice);
+                            if (ptr.child == u8) {
+                                try stream.readNoEof(slice);
+                            } else {
+                                for (slice) |*item| {
+                                    try recursiveDeserialize(stream, ptr.child, allocator, item);
+                                }
+                            }
+                            target.* = slice;
+                        },
+                        .c => unreachable,
+                        .many => unreachable,
+                    }
+                },
+                .@"struct" => |str| {
+                    inline for (str.fields) |fld| {
+                        try recursiveDeserialize(stream, fld.type, allocator, &@field(target.*, fld.name));
+                    }
+                },
+                else => return DatabaseError.InvalidDataType,
+            }
+        }
+
         pub fn convertToBytes(self: *const Self, allocator: *const std.mem.Allocator) ![]u8 {
-            return switch (@typeInfo(T)) {
-                .int, .float, .comptime_int, .comptime_float => {
-                    const bytes = try allocator.alloc(u8, @sizeOf(T));
-                    std.mem.writeInt(std.meta.Int(.unsigned, @sizeOf(T) * 8), bytes[0..@sizeOf(T)], @bitCast(self.data), .little);
-                    return bytes;
-                },
-                .bool => {
-                    const bytes = try allocator.alloc(u8, 1);
-                    bytes[0] = if (self.data) 1 else 0;
-                    return bytes;
-                },
-                .array => |info| {
-                    if (info.child == u8) {
-                        return try allocator.dupe(u8, &self.data);
-                    } else {
-                        const bytes = try allocator.alloc(u8, @sizeOf(T));
-                        @memcpy(bytes, std.mem.asBytes(&self.data));
-                        return bytes;
-                    }
-                },
-                .@"struct" => {
-                    const bytes = try allocator.alloc(u8, @sizeOf(T));
-                    @memcpy(bytes, std.mem.asBytes(&self.data));
-                    return bytes;
-                },
-                .pointer => |info| {
-                    if (info.child == u8 and info.size == .slice) {
-                        return try allocator.dupe(u8, self.data);
-                    } else if (info.size == .Slice) {
-                        const total_size = self.data.len * @sizeOf(info.child);
-                        const bytes = try allocator.alloc(u8, @sizeOf(usize) + total_size);
-                        std.mem.writeInt(usize, bytes[0..@sizeOf(usize)], self.data.len, .little);
-                        @memcpy(bytes[@sizeOf(usize)..], std.mem.sliceAsBytes(self.data));
-                        return bytes;
-                    } else {
-                        return DatabaseError.InvalidDataType;
-                    }
-                },
-                else => DatabaseError.InvalidDataType,
-            };
+            var list = std.ArrayList(u8).init(allocator.*);
+            defer list.deinit();
+
+            try serializeRecursive(list.writer(), T, self.data);
+            return try allocator.dupe(u8, list.items);
         }
 
         pub fn fromBytes(bytes: []const u8, allocator: std.mem.Allocator) !Self {
-            return switch (@typeInfo(T)) {
-                .int, .float, .comptime_int, .comptime_float => {
-                    if (bytes.len != @sizeOf(T)) return error.InvalidSize;
-                    const int_val = std.mem.readInt(std.meta.Int(.unsigned, @sizeOf(T) * 8), bytes[0..@sizeOf(T)], .little);
-                    return Self{ .data = @bitCast(int_val) };
-                },
-                .bool => {
-                    if (bytes.len != 1) return error.InvalidSize;
-                    return Self{ .data = bytes[0] != 0 };
-                },
-                .array => |info| {
-                    if (info.child == u8) {
-                        if (bytes.len != info.len) return DatabaseError.InvalidDataType;
-                        var arr: T = undefined;
-                        @memcpy(&arr, bytes);
-                        return Self{ .data = arr };
-                    } else {
-                        if (bytes.len != @sizeOf(T)) return DatabaseError.InvalidDataType;
-                        var data: T = undefined;
-                        @memcpy(std.mem.asBytes(&data), bytes);
-                        return Self{ .data = data };
-                    }
-                },
-                .pointer => |info| {
-                    if (info.child == u8 and info.size == .slice) {
-                        return Self{ .data = try allocator.dupe(u8, bytes) };
-                    } else if (info.size == .Slice) {
-                        if (bytes.len < @sizeOf(usize)) return DatabaseError.InvalidDataType;
-                        const len = std.mem.readInt(usize, bytes[0..@sizeOf(usize)], .little);
-                        const element_size = @sizeOf(info.child);
-                        if (bytes.len != @sizeOf(usize) + len * element_size) return DatabaseError.InvalidDataType;
-
-                        const slice_bytes = bytes[@sizeOf(usize)..];
-                        const typed_slice = std.mem.bytesAsSlice(info.child, slice_bytes);
-                        return Self{ .data = try allocator.dupe(info.child, typed_slice) };
-                    } else {
-                        return DatabaseError.InvalidDataType;
-                    }
-                },
-                .@"struct" => {
-                    if (bytes.len != @sizeOf(T)) return DatabaseError.InvalidDataType;
-                    var data: T = undefined;
-                    @memcpy(std.mem.asBytes(&data), bytes);
-                    return Self{ .data = data };
-                },
-                else => DatabaseError.InvalidDataType,
-            };
+            var stream = std.io.fixedBufferStream(bytes);
+            var result: T = undefined;
+            try recursiveDeserialize(stream.reader(), T, allocator, &result);
+            return Self{ .data = result };
         }
     };
 }
@@ -208,8 +236,6 @@ const Page = struct {
     }
 };
 
-// Transactions
-
 pub const TransactionType = enum { ReadOnly, WriteOnly, ReadWrite };
 
 pub const TransactionState = enum { Active, Committed, Aborted };
@@ -288,12 +314,38 @@ pub const Transaction = struct {
     }
 };
 
+pub const DiskConfig = struct {
+    enabled: bool = false,
+    file_path: ?[]const u8 = null,
+    sync_on_commit: bool = true,
+};
+
+const SerializedPage = struct {
+    page_id: u32,
+    parent_id: u32,
+    is_leaf: bool,
+    key_count: u32,
+    prev: u32,
+    next: u32,
+    keys: [][]const u8,
+    values: [][]const u8,
+};
+
+const DatabaseData = struct {
+    id: u32,
+    name: []const u8,
+    root_page: u32,
+    next_page_id: u32,
+    pages: []SerializedPage,
+};
+
 pub const Database = struct {
     id: u32,
     name: []const u8,
     root_page: u32,
     pages: std.HashMap(u32, Page, std.hash_map.AutoContext(u32), std.hash_map.default_max_load_percentage),
     next_page_id: u32,
+    disk_config: DiskConfig = .{},
     allocator: std.mem.Allocator,
 
     const Self = @This();
@@ -317,12 +369,131 @@ pub const Database = struct {
     pub fn deinit(self: *Self) void {
         self.allocator.free(self.name);
 
+        if (self.disk_config.file_path) |path| {
+            self.allocator.free(path);
+        }
+
         var page_iter = self.pages.iterator();
         while (page_iter.next()) |entry| {
             entry.value_ptr.deinit(self.allocator);
         }
 
         self.pages.deinit();
+    }
+
+    pub fn enableDiskStorage(self: *Self, file_path: []const u8, sync_on_commit: bool) !void {
+        if (self.disk_config.enabled) return DatabaseError.InvalidDatabase;
+        self.disk_config = DiskConfig{
+            .enabled = true,
+            .file_path = try self.allocator.dupe(u8, file_path),
+            .sync_on_commit = sync_on_commit,
+        };
+
+        try self.loadFromDisk();
+    }
+
+    pub fn saveToDisk(self: *Self) !void {
+        if (!self.disk_config.enabled or self.disk_config.file_path == null) return;
+
+        const file = std.fs.cwd().createFile(self.disk_config.file_path.?, .{}) catch {
+            return DatabaseError.DiskWriteError;
+        };
+        defer file.close();
+
+        const serialized_pages = try self.allocator.alloc(SerializedPage, self.pages.count());
+        defer self.allocator.free(serialized_pages);
+
+        var page_iter = self.pages.iterator();
+        var i: usize = 0;
+        while (page_iter.next()) |entry| {
+            const page = entry.value_ptr;
+            serialized_pages[i] = SerializedPage{
+                .page_id = page.header.page_id,
+                .parent_id = page.header.parent_id,
+                .is_leaf = page.header.is_leaf,
+                .key_count = page.header.key_count,
+                .prev = page.header.prev,
+                .next = page.header.next,
+                .keys = page.keys[0..page.header.key_count],
+                .values = page.values[0..page.header.key_count],
+            };
+            i += 1;
+        }
+
+        const db_data = DatabaseData{
+            .id = self.id,
+            .name = self.name,
+            .root_page = self.root_page,
+            .next_page_id = self.next_page_id,
+            .pages = serialized_pages,
+        };
+
+        const value_wrapper = Value(DatabaseData){ .data = db_data };
+        const bytes = try value_wrapper.convertToBytes(&self.allocator);
+        defer self.allocator.free(bytes);
+
+        try file.writeAll(bytes);
+
+        if (self.disk_config.sync_on_commit) {
+            try file.sync();
+        }
+    }
+
+    fn loadFromDisk(self: *Self) !void {
+        if (!self.disk_config.enabled or self.disk_config.file_path == null) return;
+
+        const file = std.fs.cwd().openFile(self.disk_config.file_path.?, .{}) catch {
+            return;
+        };
+        defer file.close();
+
+        const file_size = try file.getEndPos();
+        const bytes = try self.allocator.alloc(u8, file_size);
+        defer self.allocator.free(bytes);
+
+        _ = try file.readAll(bytes);
+
+        const value_wrapper = try Value(DatabaseData).fromBytes(bytes, self.allocator);
+        const db_data = value_wrapper.data;
+        defer {
+            self.allocator.free(db_data.name);
+            for (db_data.pages) |page| {
+                for (page.keys) |key| {
+                    self.allocator.free(key);
+                }
+                for (page.values) |value| {
+                    self.allocator.free(value);
+                }
+                self.allocator.free(page.keys);
+                self.allocator.free(page.values);
+            }
+            self.allocator.free(db_data.pages);
+        }
+
+        for (db_data.pages) |serialized_page| {
+            if (self.pages.getPtr(serialized_page.page_id)) |current_page| {
+                for (serialized_page.keys, serialized_page.values) |key, value| {
+                    if (current_page.search(key) == null) {
+                        try current_page.insert(&self.allocator, key, value);
+                    }
+                }
+            } else {
+                var new_page = try Page.init(self.allocator, serialized_page.page_id, serialized_page.is_leaf);
+                new_page.header.parent_id = serialized_page.parent_id;
+                new_page.header.prev = serialized_page.prev;
+                new_page.header.next = serialized_page.next;
+
+                for (serialized_page.keys, serialized_page.values) |key, value| {
+                    try new_page.insert(&self.allocator, key, value);
+                }
+
+                try self.pages.put(serialized_page.page_id, new_page);
+            }
+        }
+
+        if (db_data.next_page_id > self.next_page_id) {
+            self.next_page_id = db_data.next_page_id;
+        }
     }
 
     pub fn get(self: *Self, txn: *Transaction, key: []const u8) !?[]const u8 {
@@ -476,6 +647,18 @@ pub const Environment = struct {
 
     pub fn commit_txn(self: *Self, txn_id: u32) !void {
         var txn = try self.get_txn(txn_id);
+
+        for (txn.dirty_pages.items) |_| {
+            var db_iter = self.databases.iterator();
+            while (db_iter.next()) |entry| {
+                const db = entry.value_ptr;
+                if (db.disk_config.enabled) {
+                    try db.saveToDisk();
+                }
+            }
+            break;
+        }
+
         try txn.commit();
         txn.deinit();
         _ = self.transactions.remove(txn_id);

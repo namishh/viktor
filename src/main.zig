@@ -1,5 +1,6 @@
 const std = @import("std");
 const BagOfWords = @import("processing").BagOfWords;
+const shimmer = @import("shimmer");
 
 fn setupBag(allocator: std.mem.Allocator) !BagOfWords {
     var Bag = try BagOfWords.init(allocator);
@@ -19,6 +20,9 @@ pub fn main() !void {
 
     const string1 = "different world world";
     const s = try bag.transform(string1);
+
+    var env = try shimmer.Environment.init(allocator);
+    defer env.deinit();
 
     std.debug.print("Transformed vector: ", .{});
     for (s, 0..) |val, i| {
