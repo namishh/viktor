@@ -218,7 +218,11 @@ const Page = struct {
         while (pos < self.header.key_count) {
             const cmp = std.mem.order(u8, self.keys[pos], key);
             if (cmp == .gt) break;
-            if (cmp == .eq) return DatabaseError.KeyExists;
+            if (cmp == .eq) {
+                allocator.free(self.values[pos]);
+                self.values[pos] = try allocator.dupe(u8, value);
+                return;
+            }
             pos += 1;
         }
 
