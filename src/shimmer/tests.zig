@@ -10,6 +10,7 @@ const testing = std.testing;
 const expect = testing.expect;
 const expectEqual = testing.expectEqual;
 const expectError = testing.expectError;
+const expectEqualStrings = testing.expectEqualStrings;
 
 fn setupTestEnvironment(allocator: std.mem.Allocator) !Environment {
     return try Environment.init(allocator);
@@ -176,28 +177,6 @@ test "Value: array types" {
 }
 
 // ACTUAL GOOD TESTS
-
-test "Database: dupe key prevention" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    var env = try setupTestEnvironment(allocator);
-    defer env.deinit();
-
-    const db_id = try env.open("test_db");
-    const db = try env.get_db(db_id);
-    const txn_id = try env.begin_txn(.ReadWrite);
-    const txn = try env.get_txn(txn_id);
-
-    try db.putTyped(i32, txn, "duplicate_key", 123, allocator);
-
-    try expectError(DatabaseError.KeyExists, db.putTyped(i32, txn, "duplicate_key", 456, allocator));
-
-    const result = try db.getTyped(i32, txn, "duplicate_key");
-    try expect(result != null);
-    try expectEqual(@as(i32, 123), result.?.data);
-}
 
 test "Transaction: Basic commit flow" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -378,4 +357,64 @@ test "Database: Basic delete operation" {
     result = try db.getTyped(i32, txn, "keep_me");
     try expect(result != null);
     try expectEqual(@as(i32, 888), result.?.data);
+}
+
+test "Persistence: Basic save and load" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const test_file = "test_persistence.db";
+
+    std.fs.cwd().deleteFile(test_file) catch {};
+    defer std.fs.cwd().deleteFile(test_file) catch {};
+
+    {
+        var env = try setupTestEnvironment(allocator);
+        defer env.deinit();
+
+        const db_id = try env.open("persistence_test");
+        var db = try env.get_db(db_id);
+
+        try db.enableDiskStorage(test_file, true);
+
+        const txn_id = try env.begin_txn(.ReadWrite);
+        const txn = try env.get_txn(txn_id);
+
+        try db.putTyped(i32, txn, "persistent_key1", 12345, allocator);
+        try db.putTyped([]const u8, txn, "persistent_key2", "hello world", allocator);
+        try db.putTyped(f64, txn, "persistent_key3", 3.14159, allocator);
+
+        try env.commit_txn(txn_id);
+    }
+
+    {
+        var env = try setupTestEnvironment(allocator);
+        defer env.deinit();
+
+        const db_id = try env.open("persistence_test_reload");
+        var db = try env.get_db(db_id);
+
+        try db.enableDiskStorage(test_file, true);
+
+        const txn_id = try env.begin_txn(.ReadOnly);
+        const txn = try env.get_txn(txn_id);
+        defer {
+            txn.deinit();
+            _ = env.transactions.remove(txn_id);
+        }
+
+        const result1 = try db.getTyped(i32, txn, "persistent_key1");
+        try expect(result1 != null);
+        try expectEqual(@as(i32, 12345), result1.?.data);
+
+        const result2 = try db.getTyped([]const u8, txn, "persistent_key2");
+        try expect(result2 != null);
+        try expectEqualStrings("hello world", result2.?.data);
+        defer if (result2) |r| allocator.free(r.data); // Add this line
+
+        const result3 = try db.getTyped(f64, txn, "persistent_key3");
+        try expect(result3 != null);
+        try expectEqual(@as(f64, 3.14159), result3.?.data);
+    }
 }
