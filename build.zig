@@ -11,7 +11,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const shimmer_mod = b.addModule("shimmer", .{
-        .root_source_file = b.path("src/shimmer/shimmer.zig"),
+        .root_source_file = b.path("src/shimmer/main.zig"),
     });
 
     const processing = b.addModule("processing", .{

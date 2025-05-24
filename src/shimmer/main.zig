@@ -33,7 +33,7 @@ pub fn Value(comptime T: type) type {
                     if (T2 == usize) {
                         try stream.writeInt(u64, value, .little);
                     } else {
-                        try stream.writeInt(AlignedInt(T), value, .little);
+                        try stream.writeInt(AlignedInt(T2), value, .little);
                     }
                 },
                 .pointer => |ptr| {

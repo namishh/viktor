@@ -1,10 +1,10 @@
 const std = @import("std");
-const Environment = @import("shimmer.zig").Environment;
-const Database = @import("shimmer.zig").Database;
-const Transaction = @import("shimmer.zig").Transaction;
-const Value = @import("shimmer.zig").Value;
-const DatabaseError = @import("shimmer.zig").DatabaseError;
-const TransactionState = @import("shimmer.zig").TransactionState;
+const Environment = @import("main.zig").Environment;
+const Database = @import("main.zig").Database;
+const Transaction = @import("main.zig").Transaction;
+const Value = @import("main.zig").Value;
+const DatabaseError = @import("main.zig").DatabaseError;
+const TransactionState = @import("main.zig").TransactionState;
 
 const testing = std.testing;
 const expect = testing.expect;
