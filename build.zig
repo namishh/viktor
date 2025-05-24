@@ -10,10 +10,21 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const shimmer_mod = b.addModule("shimmer", .{
+        .root_source_file = b.path("src/shimmer/shimmer.zig"),
+    });
+
+    const bagofwords = b.addModule("bagofwords", .{
+        .root_source_file = b.path("src/bagofwords/main.zig"),
+    });
+
     const exe = b.addExecutable(.{
         .name = "viktor",
         .root_module = exe_mod,
     });
+
+    exe.root_module.addImport("shimmer", shimmer_mod);
+    exe.root_module.addImport("bagofwords", bagofwords);
 
     b.installArtifact(exe);
     const run_cmd = b.addRunArtifact(exe);

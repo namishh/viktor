@@ -1,5 +1,5 @@
 const std = @import("std");
-const BagOfWords = @import("bow.zig").BagOfWords;
+const BagOfWords = @import("bagofwords");
 
 fn setupBag(allocator: std.mem.Allocator) !BagOfWords {
     var Bag = try BagOfWords.init(allocator);

@@ -2,4 +2,6 @@ wip vector database to learn more about database internals
 
 todo 
 - [ ] save the keyvalue db to file and read from it if file exists.
+- [ ] parallelize the keyvalue db
+- [ ] opt in to save the keyvalue db to file
 - [x] test the keyvalue db rigourously

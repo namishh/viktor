@@ -4,5 +4,6 @@
 !build.zig.zon
 !src
 !src/*.zig
-!src/**/*.zig 
+!src/**/*.zig
+!src/**/
 !readme*
