@@ -14,8 +14,8 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/shimmer/shimmer.zig"),
     });
 
-    const bagofwords = b.addModule("bagofwords", .{
-        .root_source_file = b.path("src/bagofwords/main.zig"),
+    const processing = b.addModule("processing", .{
+        .root_source_file = b.path("src/processing/main.zig"),
     });
 
     const exe = b.addExecutable(.{
@@ -24,7 +24,7 @@ pub fn build(b: *std.Build) void {
     });
 
     exe.root_module.addImport("shimmer", shimmer_mod);
-    exe.root_module.addImport("bagofwords", bagofwords);
+    exe.root_module.addImport("processing", processing);
 
     b.installArtifact(exe);
     const run_cmd = b.addRunArtifact(exe);

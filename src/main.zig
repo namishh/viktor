@@ -1,5 +1,5 @@
 const std = @import("std");
-const BagOfWords = @import("bagofwords");
+const BagOfWords = @import("processing").BagOfWords;
 
 fn setupBag(allocator: std.mem.Allocator) !BagOfWords {
     var Bag = try BagOfWords.init(allocator);
