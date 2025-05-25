@@ -1,143 +1,10 @@
 // shimmer - a very simple key value store
 const std = @import("std");
+const DatabaseError = @import("errors.zig").DatabaseError;
+const Value = @import("value.zig").Value;
 
 pub const MAX_KEYS_PER_PAGE = 8192;
 pub const PAGE_SIZE = 64 * 8192;
-
-pub const DatabaseError = error{ KeyExists, NotFound, DiskWriteError, InvalidDataType, InvalidDatabase, InvalidTransaction, InvalidSize, TransactionNotActive, InvalidKey };
-
-// serialization code taken from https://github.com/ziglibs/s2s/
-
-fn AlignedInt(comptime T: type) type {
-    return std.math.ByteAlignedInt(T);
-}
-
-pub fn Value(comptime T: type) type {
-    return struct {
-        data: T,
-        const Self = @This();
-
-        fn serializeRecursive(stream: anytype, comptime T2: type, value: T2) @TypeOf(stream).Error!void {
-            switch (@typeInfo(T2)) {
-                .void => {},
-                .bool => try stream.writeByte(@intFromBool(value)),
-                .float => switch (T2) {
-                    f16 => try stream.writeInt(u16, @bitCast(value), .little),
-                    f32 => try stream.writeInt(u32, @bitCast(value), .little),
-                    f64 => try stream.writeInt(u64, @bitCast(value), .little),
-                    f80 => try stream.writeInt(u80, @bitCast(value), .little),
-                    f128 => try stream.writeInt(u128, @bitCast(value), .little),
-                    else => unreachable,
-                },
-                .int => {
-                    if (T2 == usize) {
-                        try stream.writeInt(u64, value, .little);
-                    } else {
-                        try stream.writeInt(AlignedInt(T2), value, .little);
-                    }
-                },
-                .pointer => |ptr| {
-                    switch (ptr.size) {
-                        .one => try serializeRecursive(stream, ptr.child, value.*),
-                        .slice => {
-                            try stream.writeInt(u64, value.len, .little);
-                            if (ptr.child == u8) {
-                                try stream.writeAll(value);
-                            } else {
-                                for (value) |item| {
-                                    try serializeRecursive(stream, ptr.child, item);
-                                }
-                            }
-                        },
-                        .c => unreachable,
-                        .many => unreachable,
-                    }
-                },
-                .@"struct" => |str| {
-                    inline for (str.fields) |fld| {
-                        try serializeRecursive(stream, fld.type, @field(value, fld.name));
-                    }
-                },
-                else => return DatabaseError.InvalidDataType,
-            }
-        }
-
-        fn recursiveDeserialize(
-            stream: anytype,
-            comptime T2: type,
-            allocator: ?std.mem.Allocator,
-            target: *T2,
-        ) (@TypeOf(stream).Error || error{ UnexpectedData, OutOfMemory, EndOfStream })!void {
-            switch (@typeInfo(T2)) {
-                .void => target.* = {},
-                .bool => target.* = (try stream.readByte()) != 0,
-                .float => target.* = @bitCast(switch (T2) {
-                    f16 => try stream.readInt(u16, .little),
-                    f32 => try stream.readInt(u32, .little),
-                    f64 => try stream.readInt(u64, .little),
-                    f80 => try stream.readInt(u80, .little),
-                    f128 => try stream.readInt(u128, .little),
-                    else => unreachable,
-                }),
-                .int => target.* = if (T2 == usize)
-                    std.math.cast(usize, try stream.readInt(u64, .little)) orelse return error.UnexpectedData
-                else
-                    @truncate(try stream.readInt(AlignedInt(T2), .little)),
-                .pointer => |ptr| {
-                    switch (ptr.size) {
-                        .one => {
-                            const pointer = try allocator.?.create(ptr.child);
-                            errdefer allocator.?.destroy(pointer);
-                            try recursiveDeserialize(stream, ptr.child, allocator, pointer);
-                            target.* = pointer;
-                        },
-                        .slice => {
-                            const length = std.math.cast(usize, try stream.readInt(u64, .little)) orelse return error.UnexpectedData;
-                            const slice = try allocator.?.alloc(ptr.child, length);
-                            errdefer allocator.?.free(slice);
-                            if (ptr.child == u8) {
-                                try stream.readNoEof(slice);
-                            } else {
-                                for (slice) |*item| {
-                                    try recursiveDeserialize(stream, ptr.child, allocator, item);
-                                }
-                            }
-                            target.* = slice;
-                        },
-                        .c => unreachable,
-                        .many => unreachable,
-                    }
-                },
-                .@"struct" => |str| {
-                    inline for (str.fields) |fld| {
-                        try recursiveDeserialize(stream, fld.type, allocator, &@field(target.*, fld.name));
-                    }
-                },
-                else => return DatabaseError.InvalidDataType,
-            }
-        }
-
-        pub fn convertToBytes(self: *const Self, allocator: *const std.mem.Allocator) ![]u8 {
-            var list = std.ArrayList(u8).init(allocator.*);
-            defer list.deinit();
-
-            try serializeRecursive(list.writer(), T, self.data);
-            return try allocator.dupe(u8, list.items);
-        }
-
-        pub fn fromBytes(bytes: []const u8, allocator: std.mem.Allocator) !Self {
-            var stream = std.io.fixedBufferStream(bytes);
-            var result: T = undefined;
-            try recursiveDeserialize(stream.reader(), T, allocator, &result);
-            return Self{ .data = result };
-        }
-    };
-}
-
-const KeyValue = struct {
-    key: []const u8,
-    value: []const u8,
-};
 
 // simple b+ tree storage
 
@@ -237,6 +104,377 @@ const Page = struct {
         self.keys[pos] = try allocator.dupe(u8, key);
         self.values[pos] = try allocator.dupe(u8, value);
         self.header.key_count += 1;
+    }
+};
+
+pub const LockType = enum {
+    Shared, // multiple readers can hold this lock. S
+    Exclusive, // only one writer can hold this lock. X
+    IntentShared, // a transaction intends to read. IS
+    IntentExclusive, // a transaction intends to write. IX
+    SharedIntentExclusive, // a transaction intends to read and write. SIX
+};
+
+pub const LockMode = enum { S, X, IS, IX, SIX, None };
+
+const LOCK_COMPATIBILITY = [_][6]bool{
+    //       None  IS    IX    S     SIX   X
+    [_]bool{ true, true, true, true, true, true }, // None
+    [_]bool{ true, true, true, true, true, false }, // IS
+    [_]bool{ true, true, true, false, false, false }, // IX
+    [_]bool{ true, true, false, true, false, false }, // S
+    [_]bool{ true, true, false, false, false, false }, // SIX
+    [_]bool{ true, false, false, false, false, false }, // X
+};
+
+pub const ResourceType = enum {
+    Database,
+    Page,
+    Record,
+};
+
+pub const LockRequest = struct {
+    transaction_id: u32,
+    resource_id: u64,
+    resource_type: ResourceType,
+    lock_mode: LockMode,
+    granted: bool = false,
+    timestamp: i64,
+
+    const Self = @This();
+
+    pub fn init(txn_id: u32, res_id: u64, res_type: ResourceType, mode: LockMode) Self {
+        return Self{
+            .transaction_id = txn_id,
+            .resource_id = res_id,
+            .resource_type = res_type,
+            .lock_mode = mode,
+            .timestamp = std.time.milliTimestamp(),
+        };
+    }
+};
+
+pub const DeadlockDetector = struct {
+    wait_graph: std.HashMap(u32, std.ArrayList(u32), std.hash_map.AutoContext(u32), std.hash_map.default_max_load_percentage),
+    allocator: std.mem.Allocator,
+
+    const Self = @This();
+
+    pub fn init(allocator: std.mem.Allocator) Self {
+        return Self{
+            .wait_graph = std.HashMap(u32, std.ArrayList(u32), std.hash_map.AutoContext(u32), std.hash_map.default_max_load_percentage).init(allocator),
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        var iter = self.wait_graph.iterator();
+        while (iter.next()) |entry| {
+            entry.value_ptr.deinit();
+        }
+        self.wait_graph.deinit();
+    }
+
+    pub fn addEdge(self: *Self, from: u32, to: u32) !void {
+        const result = try self.wait_graph.getOrPut(from);
+        if (!result.found_existing) {
+            result.value_ptr.* = std.ArrayList(u32).init(self.allocator);
+        }
+        try result.value_ptr.append(to);
+    }
+
+    pub fn removeEdge(self: *Self, from: u32, to: u32) void {
+        if (self.wait_graph.getPtr(from)) |edges| {
+            for (edges.items, 0..) |edge, i| {
+                if (edge == to) {
+                    _ = edges.swapRemove(i);
+                    break;
+                }
+            }
+        }
+    }
+
+    pub fn detectCycle(self: *Self) ?u32 {
+        var visited = std.HashMap(u32, bool, std.hash_map.AutoContext(u32), std.hash_map.default_max_load_percentage).init(self.allocator);
+        defer visited.deinit();
+
+        var rec_stack = std.HashMap(u32, bool, std.hash_map.AutoContext(u32), std.hash_map.default_max_load_percentage).init(self.allocator);
+        defer rec_stack.deinit();
+
+        var iter = self.wait_graph.iterator();
+        while (iter.next()) |entry| {
+            const node = entry.key_ptr.*;
+            if (!visited.contains(node)) {
+                if (self.dfsDetectCycle(node, &visited, &rec_stack)) |victim| {
+                    return victim;
+                }
+            }
+        }
+        return null;
+    }
+
+    fn dfsDetectCycle(self: *Self, node: u32, visited: *std.HashMap(u32, bool, std.hash_map.AutoContext(u32), std.hash_map.default_max_load_percentage), rec_stack: *std.HashMap(u32, bool, std.hash_map.AutoContext(u32), std.hash_map.default_max_load_percentage)) ?u32 {
+        visited.put(node, true) catch return null;
+        rec_stack.put(node, true) catch return null;
+
+        if (self.wait_graph.get(node)) |edges| {
+            for (edges.items) |neighbor| {
+                if (!visited.contains(neighbor)) {
+                    if (self.dfsDetectCycle(neighbor, visited, rec_stack)) |victim| {
+                        return victim;
+                    }
+                } else if (rec_stack.contains(neighbor)) {
+                    return if (node > neighbor) node else neighbor;
+                }
+            }
+        }
+
+        rec_stack.put(node, false) catch {};
+        return null;
+    }
+};
+
+pub const LockManager = struct {
+    lock_table: std.HashMap(u64, std.ArrayList(LockRequest), std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage),
+    transaction_locks: std.HashMap(u32, std.ArrayList(u64), std.hash_map.AutoContext(u32), std.hash_map.default_max_load_percentage),
+    deadlock_detector: DeadlockDetector,
+    mutex: std.Thread.Mutex = .{},
+    allocator: std.mem.Allocator,
+
+    const Self = @This();
+
+    pub fn init(allocator: std.mem.Allocator) Self {
+        return Self{
+            .lock_table = std.HashMap(u64, std.ArrayList(LockRequest), std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
+            .transaction_locks = std.HashMap(u32, std.ArrayList(u64), std.hash_map.AutoContext(u32), std.hash_map.default_max_load_percentage).init(allocator),
+            .deadlock_detector = DeadlockDetector.init(allocator),
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        var lock_iter = self.lock_table.iterator();
+        while (lock_iter.next()) |entry| {
+            entry.value_ptr.deinit();
+        }
+        self.lock_table.deinit();
+
+        var txn_iter = self.transaction_locks.iterator();
+        while (txn_iter.next()) |entry| {
+            entry.value_ptr.deinit();
+        }
+        self.transaction_locks.deinit();
+        self.deadlock_detector.deinit();
+    }
+
+    fn isCompatible(mode1: LockMode, mode2: LockMode) bool {
+        const idx1 = @intFromEnum(mode1);
+        const idx2 = @intFromEnum(mode2);
+        return LOCK_COMPATIBILITY[idx1][idx2];
+    }
+
+    pub fn acquireLock(self: *Self, txn_id: u32, resource_id: u64, resource_type: ResourceType, mode: LockMode, timeout_ms: u64) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.lock_table.get(resource_id)) |requests| {
+            for (requests.items) |*request| {
+                if (request.transaction_id == txn_id and request.granted) {
+                    if (canUpgrade(request.lock_mode, mode)) {
+                        request.lock_mode = mode;
+                        return;
+                    } else if (request.lock_mode == mode) {
+                        return;
+                    }
+                }
+            }
+        }
+
+        var new_request = LockRequest.init(txn_id, resource_id, resource_type, mode);
+
+        var can_grant = true;
+        if (self.lock_table.get(resource_id)) |requests| {
+            for (requests.items) |*existing| {
+                if (existing.granted and existing.transaction_id != txn_id) {
+                    if (!isCompatible(existing.lock_mode, mode)) {
+                        can_grant = false;
+                        try self.deadlock_detector.addEdge(txn_id, existing.transaction_id);
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (can_grant) {
+            new_request.granted = true;
+            try self.addLockToTables(resource_id, new_request, txn_id);
+        } else {
+            if (self.deadlock_detector.detectCycle()) |victim_txn| {
+                if (victim_txn == txn_id) {
+                    return DatabaseError.DeadlockDetected;
+                }
+                try self.abortTransaction(victim_txn);
+                new_request.granted = true;
+                try self.addLockToTables(resource_id, new_request, txn_id);
+            } else {
+                try self.addLockToTables(resource_id, new_request, txn_id);
+                std.time.sleep(timeout_ms * std.time.ns_per_ms);
+                return DatabaseError.LockTimeout;
+            }
+        }
+    }
+
+    fn canUpgrade(current: LockMode, requested: LockMode) bool {
+        return switch (current) {
+            .IS => requested == .S or requested == .X or requested == .IX or requested == .SIX,
+            .IX => requested == .X or requested == .SIX,
+            .S => requested == .X or requested == .SIX,
+            else => false,
+        };
+    }
+
+    fn addLockToTables(self: *Self, resource_id: u64, request: LockRequest, txn_id: u32) !void {
+        const lock_result = try self.lock_table.getOrPut(resource_id);
+        if (!lock_result.found_existing) {
+            lock_result.value_ptr.* = std.ArrayList(LockRequest).init(self.allocator);
+        }
+        try lock_result.value_ptr.append(request);
+
+        if (request.granted) {
+            const txn_result = try self.transaction_locks.getOrPut(txn_id);
+            if (!txn_result.found_existing) {
+                txn_result.value_ptr.* = std.ArrayList(u64).init(self.allocator);
+            }
+            try txn_result.value_ptr.append(resource_id);
+        }
+    }
+
+    pub fn releaseLock(self: *Self, txn_id: u32, resource_id: u64) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.lock_table.getPtr(resource_id)) |requests| {
+            for (requests.items, 0..) |*request, i| {
+                if (request.transaction_id == txn_id and request.granted) {
+                    _ = requests.swapRemove(i);
+                    break;
+                }
+            }
+
+            try self.processWaitQueue(resource_id);
+        }
+
+        if (self.transaction_locks.getPtr(txn_id)) |txn_locks| {
+            for (txn_locks.items, 0..) |res_id, i| {
+                if (res_id == resource_id) {
+                    _ = txn_locks.swapRemove(i);
+                    break;
+                }
+            }
+        }
+    }
+
+    fn processWaitQueue(self: *Self, resource_id: u64) !void {
+        if (self.lock_table.getPtr(resource_id)) |requests| {
+            var granted_any = false;
+
+            for (requests.items) |*request| {
+                if (!request.granted) {
+                    var can_grant = true;
+
+                    for (requests.items) |*existing| {
+                        if (existing.granted and existing.transaction_id != request.transaction_id) {
+                            if (!isCompatible(existing.lock_mode, request.lock_mode)) {
+                                can_grant = false;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (can_grant) {
+                        request.granted = true;
+                        granted_any = true;
+
+                        const txn_result = try self.transaction_locks.getOrPut(request.transaction_id);
+                        if (!txn_result.found_existing) {
+                            txn_result.value_ptr.* = std.ArrayList(u64).init(self.allocator);
+                        }
+                        try txn_result.value_ptr.append(resource_id);
+
+                        for (requests.items) |*other| {
+                            if (other.granted and other.transaction_id != request.transaction_id) {
+                                self.deadlock_detector.removeEdge(request.transaction_id, other.transaction_id);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (granted_any) {
+                try self.processWaitQueue(resource_id);
+            }
+        }
+    }
+
+    pub fn releaseAllLocks(self: *Self, txn_id: u32) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.transaction_locks.get(txn_id)) |txn_locks| {
+            const locks_copy = try self.allocator.dupe(u64, txn_locks.items);
+            defer self.allocator.free(locks_copy);
+
+            for (locks_copy) |resource_id| {
+                try self.releaseLockInternal(txn_id, resource_id);
+            }
+        }
+
+        if (self.transaction_locks.getPtr(txn_id)) |txn_locks| {
+            txn_locks.deinit();
+            _ = self.transaction_locks.remove(txn_id);
+        }
+    }
+
+    fn releaseLockInternal(self: *Self, txn_id: u32, resource_id: u64) !void {
+        if (self.lock_table.getPtr(resource_id)) |requests| {
+            for (requests.items, 0..) |*request, i| {
+                if (request.transaction_id == txn_id and request.granted) {
+                    _ = requests.swapRemove(i);
+                    try self.processWaitQueue(resource_id);
+                    break;
+                }
+            }
+        }
+    }
+
+    pub fn abortTransaction(self: *Self, txn_id: u32) !void {
+        try self.releaseAllLocks(txn_id);
+
+        var iter = self.lock_table.iterator();
+        while (iter.next()) |entry| {
+            const requests = entry.value_ptr;
+            for (requests.items, 0..) |*request, i| {
+                if (request.transaction_id == txn_id and !request.granted) {
+                    _ = requests.swapRemove(i);
+                    break;
+                }
+            }
+        }
+    }
+
+    pub fn lockPage(self: *Self, txn_id: u32, page_id: u32, mode: LockMode) !void {
+        const resource_id = (@as(u64, @intFromEnum(ResourceType.Page)) << 32) | page_id;
+        try self.acquireLock(txn_id, resource_id, .Page, mode, 5000);
+    }
+
+    pub fn lockRecord(self: *Self, txn_id: u32, page_id: u32, key_hash: u32, mode: LockMode) !void {
+        const resource_id = (@as(u64, page_id) << 32) | key_hash;
+        try self.acquireLock(txn_id, resource_id, .Record, mode, 5000);
+    }
+
+    pub fn lockDatabase(self: *Self, txn_id: u32, db_id: u32, mode: LockMode) !void {
+        const resource_id = (@as(u64, @intFromEnum(ResourceType.Database)) << 32) | db_id;
+        try self.acquireLock(txn_id, resource_id, .Database, mode, 10000); // 10 second timeout
     }
 };
 
@@ -351,6 +589,7 @@ pub const Database = struct {
     next_page_id: u32,
     immutable: bool = true,
     disk_config: DiskConfig = .{},
+    lock_manager: LockManager,
     allocator: std.mem.Allocator,
 
     const Self = @This();
@@ -365,12 +604,15 @@ pub const Database = struct {
         const root_page = try Page.init(allocator, 1, true);
         try pages.put(1, root_page);
 
+        const lm = LockManager.init(allocator);
+
         return Self{
             .id = id,
             .name = try allocator.dupe(u8, name),
             .root_page = 1,
             .pages = pages,
             .next_page_id = 2,
+            .lock_manager = lm,
             .allocator = allocator,
         };
     }
@@ -386,6 +628,8 @@ pub const Database = struct {
         while (page_iter.next()) |entry| {
             entry.value_ptr.deinit(self.allocator);
         }
+
+        self.lock_manager.deinit();
 
         self.pages.deinit();
     }
@@ -512,6 +756,7 @@ pub const Database = struct {
             return root_page.values[index];
         }
 
+        try self.lock_manager.lockPage(txn.id, self.root_page, .S);
         return null;
     }
 
@@ -557,6 +802,7 @@ pub const Database = struct {
 
         try root_page.insert(&self.allocator, key, value);
         try txn.dirty_pages.append(self.root_page);
+        try self.lock_manager.lockPage(txn.id, self.root_page, .X);
     }
 
     pub fn putTyped(self: *Self, comptime T: type, txn: *Transaction, key: []const u8, value: T, allocator: std.mem.Allocator) !void {
@@ -594,6 +840,7 @@ pub const Database = struct {
         } else {
             return DatabaseError.NotFound;
         }
+        try self.lock_manager.lockPage(txn.id, self.root_page, .X);
     }
 };
 

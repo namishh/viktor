@@ -3,8 +3,9 @@ const Environment = @import("main.zig").Environment;
 const Database = @import("main.zig").Database;
 const Transaction = @import("main.zig").Transaction;
 const Value = @import("main.zig").Value;
-const DatabaseError = @import("main.zig").DatabaseError;
 const TransactionState = @import("main.zig").TransactionState;
+
+const DatabaseError = @import("errors.zig").DatabaseError;
 
 const testing = std.testing;
 const expect = testing.expect;
@@ -475,4 +476,164 @@ test "immutable database behavior" {
 
         try env.commit_txn(txn_id);
     }
+}
+
+test "basic shared lock compatibility" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var env = try setupTestEnvironment(allocator);
+    defer env.deinit();
+
+    const db_id = try env.open("test_db");
+    var db = try env.get_db(db_id);
+
+    const txn1_id = try env.begin_txn(.ReadOnly);
+    const txn2_id = try env.begin_txn(.ReadOnly);
+
+    try db.lock_manager.lockPage(txn1_id, 1, .S);
+    try db.lock_manager.lockPage(txn2_id, 1, .S);
+
+    try env.commit_txn(txn1_id);
+    try env.commit_txn(txn2_id);
+}
+
+test "lock release allows waiting transactions" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var env = try setupTestEnvironment(allocator);
+    defer env.deinit();
+
+    const db_id = try env.open("test_db");
+    var db = try env.get_db(db_id);
+
+    const txn1_id = try env.begin_txn(.ReadWrite);
+    const txn2_id = try env.begin_txn(.ReadOnly);
+
+    // first transaction gets exclusive lock
+    try db.lock_manager.lockPage(txn1_id, 1, .X);
+
+    // release the lock
+    try db.lock_manager.releaseLock(txn1_id, (@as(u64, @intFromEnum(@import("main.zig").ResourceType.Page)) << 32) | 1);
+
+    // Now second transaction should be able to get shared lock
+    try db.lock_manager.lockPage(txn2_id, 1, .S);
+
+    try env.commit_txn(txn1_id);
+    try env.commit_txn(txn2_id);
+}
+
+test "transaction abort releases all locks" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var env = try setupTestEnvironment(allocator);
+    defer env.deinit();
+
+    const db_id = try env.open("test_db");
+    var db = try env.get_db(db_id);
+
+    const txn1_id = try env.begin_txn(.ReadWrite);
+    const txn2_id = try env.begin_txn(.ReadOnly);
+
+    const txn1 = try env.get_txn(txn1_id);
+
+    try db.lock_manager.lockPage(txn1_id, 1, .X);
+    try db.lock_manager.lockPage(txn1_id, 2, .X);
+
+    try env.abort_txn(txn1, db_id);
+
+    try db.lock_manager.lockPage(txn2_id, 1, .S);
+    try db.lock_manager.lockPage(txn2_id, 2, .S);
+
+    try env.commit_txn(txn2_id);
+}
+
+test "lock upgrade from shared to exclusive" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var env = try setupTestEnvironment(allocator);
+    defer env.deinit();
+
+    const db_id = try env.open("test_db");
+    var db = try env.get_db(db_id);
+
+    const txn1_id = try env.begin_txn(.ReadWrite);
+
+    try db.lock_manager.lockPage(txn1_id, 1, .S);
+
+    try db.lock_manager.lockPage(txn1_id, 1, .X);
+
+    try env.commit_txn(txn1_id);
+}
+
+test "intent locks work correctly" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var env = try setupTestEnvironment(allocator);
+    defer env.deinit();
+
+    const db_id = try env.open("test_db");
+    var db = try env.get_db(db_id);
+
+    const txn1_id = try env.begin_txn(.ReadWrite);
+    const txn2_id = try env.begin_txn(.ReadOnly);
+
+    // First transaction gets intent exclusive lock
+    try db.lock_manager.lockPage(txn1_id, 1, .IX);
+
+    // Second transaction should be able to get intent shared lock
+    try db.lock_manager.lockPage(txn2_id, 1, .IS);
+
+    try env.commit_txn(txn1_id);
+    try env.commit_txn(txn2_id);
+}
+
+test "database level locking" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var env = try setupTestEnvironment(allocator);
+    defer env.deinit();
+
+    const db_id = try env.open("test_db");
+    var db = try env.get_db(db_id);
+
+    const txn1_id = try env.begin_txn(.ReadWrite);
+    const txn2_id = try env.begin_txn(.ReadOnly);
+
+    try db.lock_manager.lockDatabase(txn1_id, db_id, .X);
+
+    try env.commit_txn(txn1_id);
+    try env.commit_txn(txn2_id);
+}
+
+test "record level locking" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var env = try setupTestEnvironment(allocator);
+    defer env.deinit();
+
+    const db_id = try env.open("test_db");
+    var db = try env.get_db(db_id);
+
+    const txn1_id = try env.begin_txn(.ReadWrite);
+    const txn2_id = try env.begin_txn(.ReadWrite);
+
+    try db.lock_manager.lockRecord(txn1_id, 1, 100, .X); // key hash 100
+    try db.lock_manager.lockRecord(txn2_id, 1, 200, .X); // key hash 200
+
+    try env.commit_txn(txn1_id);
+    try env.commit_txn(txn2_id);
 }
