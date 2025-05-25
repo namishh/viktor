@@ -22,7 +22,6 @@ const Page = struct {
     keys: [][]const u8,
     values: [][]const u8,
     children: []u32,
-    data: []u8,
 
     const Self = @This();
 
@@ -30,7 +29,6 @@ const Page = struct {
         const keys = try allocator.alloc([]const u8, MAX_KEYS_PER_PAGE);
         const values = try allocator.alloc([]const u8, MAX_KEYS_PER_PAGE);
         const children = try allocator.alloc(u32, MAX_KEYS_PER_PAGE + 1);
-        const data = try allocator.alloc(u8, PAGE_SIZE);
 
         return Self{
             .header = PageHeader{
@@ -44,7 +42,6 @@ const Page = struct {
             .keys = keys,
             .values = values,
             .children = children,
-            .data = data,
         };
     }
 
@@ -59,7 +56,6 @@ const Page = struct {
         allocator.free(self.keys);
         allocator.free(self.values);
         allocator.free(self.children);
-        allocator.free(self.data);
     }
 
     pub fn search(self: *const Self, key: []const u8) ?usize {

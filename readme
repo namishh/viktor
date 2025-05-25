@@ -1,6 +1,8 @@
 wip vector database to learn more about database internals
 
-todo 
+todo
+
+1. shimmer
 - [x] save the keyvalue db to file and read from it if file exists.
 - [x] implement locks
 - [x] opt in to save the keyvalue db to file
@@ -8,3 +10,7 @@ todo
 - [x] isolate keyval and processing into seperate modules
 - [x] better serialization of Value type
 - [x] make immutablility opt in
+- [ ] document the code from the perpsective of education
+- [ ] page splitting and more performance optimizations
+- [ ] implement memory mapped files for zero copy access | side effect -> no more optional immutability
+- [ ] proper b+ tree with logarithmic search time
