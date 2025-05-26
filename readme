@@ -10,7 +10,7 @@ todo
   - [x] better serialization of Value type
   - [x] make immutablility opt in
   - [ ] document the code from the perpsective of education
-  - [ ] page splitting and more performance optimizations
+  - [x] page splitting and more performance optimizations
   - [ ] optional: maybe
     - [ ] memory mapping
 

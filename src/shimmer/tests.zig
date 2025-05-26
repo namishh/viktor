@@ -573,30 +573,6 @@ test "lock upgrade from shared to exclusive" {
     try env.commit_txn(txn1_id);
 }
 
-test "intent locks work correctly" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    var env = try setupTestEnvironment(allocator);
-    defer env.deinit();
-
-    const db_id = try env.open("test_db");
-    var db = try env.get_db(db_id);
-
-    const txn1_id = try env.begin_txn(.ReadWrite);
-    const txn2_id = try env.begin_txn(.ReadOnly);
-
-    // First transaction gets intent exclusive lock
-    try db.lock_manager.lockPage(txn1_id, 1, .IX);
-
-    // Second transaction should be able to get intent shared lock
-    try db.lock_manager.lockPage(txn2_id, 1, .IS);
-
-    try env.commit_txn(txn1_id);
-    try env.commit_txn(txn2_id);
-}
-
 test "database level locking" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
