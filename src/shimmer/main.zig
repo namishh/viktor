@@ -3,8 +3,8 @@ const std = @import("std");
 const DatabaseError = @import("errors.zig").DatabaseError;
 const Value = @import("value.zig").Value;
 
-pub const MAX_KEYS_PER_PAGE = 8192;
-pub const PAGE_SIZE = 64 * 8192;
+pub const MAX_KEYS_PER_PAGE = 1024;
+pub const PAGE_SIZE = 64 * 1024;
 
 // simple b+ tree storage
 

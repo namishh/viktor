@@ -11,8 +11,8 @@ todo
   - [x] make immutablility opt in
   - [ ] document the code from the perpsective of education
   - [ ] page splitting and more performance optimizations
-  - [ ] implement memory mapped files for zero copy access | side effect -> no more optional persistence
-  - [ ] proper b+ tree with logarithmic search time
+  - [ ] optional: maybe
+    - [ ] memory mapping
 
 [ ] hexcore
 [ ] server

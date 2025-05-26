@@ -2,7 +2,7 @@ const std = @import("std");
 const Environment = @import("main.zig").Environment;
 const Database = @import("main.zig").Database;
 const Transaction = @import("main.zig").Transaction;
-const Value = @import("main.zig").Value;
+const Value = @import("value.zig").Value;
 const TransactionState = @import("main.zig").TransactionState;
 
 const DatabaseError = @import("errors.zig").DatabaseError;
