@@ -10,9 +10,10 @@ fn AlignedInt(comptime T: type) type {
 pub fn Value(comptime T: type) type {
     return struct {
         data: T,
+        allocator: ?std.mem.Allocator,
         const Self = @This();
 
-        fn serializeRecursive(stream: anytype, comptime T2: type, value: T2) @TypeOf(stream).Error!void {
+        fn serializeRecursive(stream: anytype, comptime T2: type, value: T2) !void {
             switch (@typeInfo(T2)) {
                 .void => {},
                 .bool => try stream.writeByte(@intFromBool(value)),
@@ -33,9 +34,9 @@ pub fn Value(comptime T: type) type {
                 },
                 .pointer => |ptr| {
                     switch (ptr.size) {
-                        .one => try serializeRecursive(stream, ptr.child, value.*),
+                        .one => serializeRecursive(stream, ptr.child, value.*),
                         .slice => {
-                            try stream.writeInt(u64, value.len, .little);
+                            try stream.writeInt(u64, @as(usize, value.len), .little);
                             if (ptr.child == u8) {
                                 try stream.writeAll(value);
                             } else {
@@ -46,6 +47,15 @@ pub fn Value(comptime T: type) type {
                         },
                         .c => unreachable,
                         .many => unreachable,
+                    }
+                },
+                .array => |arr| {
+                    if (arr.child == u8) {
+                        try stream.writeAll(&value);
+                    } else {
+                        for (value) |item| {
+                            try serializeRecursive(stream, arr.child, item);
+                        }
                     }
                 },
                 .@"struct" => |str| {
@@ -103,6 +113,15 @@ pub fn Value(comptime T: type) type {
                         .many => unreachable,
                     }
                 },
+                .array => |arr| {
+                    if (arr.child == u8) {
+                        try stream.readNoEof(target);
+                    } else {
+                        for (target.*) |*item| {
+                            try recursiveDeserialize(stream, arr.child, allocator, item);
+                        }
+                    }
+                },
                 .@"struct" => |str| {
                     inline for (str.fields) |fld| {
                         try recursiveDeserialize(stream, fld.type, allocator, &@field(target.*, fld.name));
@@ -124,7 +143,36 @@ pub fn Value(comptime T: type) type {
             var stream = std.io.fixedBufferStream(bytes);
             var result: T = undefined;
             try recursiveDeserialize(stream.reader(), T, allocator, &result);
-            return Self{ .data = result };
+            return Self{ .data = result, .allocator = allocator };
+        }
+
+        fn deinitRecursive(allocator: std.mem.Allocator, comptime T2: type, value: *const T2) void {
+            switch (@typeInfo(T2)) {
+                .pointer => |ptr| {
+                    switch (ptr.size) {
+                        .slice => {
+                            allocator.free(value.*);
+                        },
+                        .one => {
+                            deinitRecursive(allocator, ptr.child, value.*);
+                            allocator.destroy(value.*);
+                        },
+                        else => {},
+                    }
+                },
+                .@"struct" => |str| {
+                    inline for (str.fields) |fld| {
+                        deinitRecursive(allocator, fld.type, &@field(value.*, fld.name));
+                    }
+                },
+                else => {},
+            }
+        }
+
+        pub fn deinit(self: *const Self) void {
+            if (self.allocator) |allocator| {
+                deinitRecursive(allocator, T, &self.data);
+            }
         }
     };
 }

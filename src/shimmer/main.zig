@@ -836,7 +836,7 @@ pub const Database = struct {
             .pages = serialized_pages,
         };
 
-        const value_wrapper = Value(DatabaseData){ .data = db_data };
+        const value_wrapper = Value(DatabaseData){ .data = db_data, .allocator = self.allocator };
         const bytes = try value_wrapper.convertToBytes(&self.allocator);
         defer self.allocator.free(bytes);
 
@@ -916,6 +916,8 @@ pub const Database = struct {
     }
 
     pub fn getTyped(self: *Self, comptime T: type, txn: *Transaction, key: []const u8) !?Value(T) {
+        if (txn.txn_type == .WriteOnly) return DatabaseError.InvalidTransaction;
+
         const value = try self.get(txn, key);
         if (value) |v| {
             const va = try Value(T).fromBytes(v, self.allocator);
@@ -961,7 +963,7 @@ pub const Database = struct {
     }
 
     pub fn putTyped(self: *Self, comptime T: type, txn: *Transaction, key: []const u8, value: T, allocator: std.mem.Allocator) !void {
-        const value_wrapper = Value(T){ .data = value };
+        const value_wrapper = Value(T){ .data = value, .allocator = allocator };
         const bytes = try value_wrapper.convertToBytes(&allocator);
         defer allocator.free(bytes);
         try self.put(txn, key, bytes);

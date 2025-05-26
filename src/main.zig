@@ -10,27 +10,30 @@ fn setupBag(allocator: std.mem.Allocator) !BagOfWords {
     return Bag;
 }
 
+pub const Person = struct {
+    name: []const u8,
+    isCool: bool,
+};
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var bag = try setupBag(allocator);
-    defer bag.deinit();
-
-    const string1 = "different world world";
-    const s = try bag.transform(string1);
-
     var env = try shimmer.Environment.init(allocator);
     defer env.deinit();
 
-    std.debug.print("Transformed vector: ", .{});
-    for (s, 0..) |val, i| {
-        if (i > 0) std.debug.print(", ", .{});
-        std.debug.print("{}", .{val});
-    }
-    std.debug.print("\n", .{});
-    allocator.free(s);
+    const db_id = try env.open("testing_db");
+    const db = try env.get_db(db_id);
 
-    std.debug.print("hello world", .{});
+    const txn_id = try env.begin_txn(.ReadWrite);
+    const txn = try env.get_txn(txn_id);
+
+    try db.putTyped(Person, txn, "name", Person{ .isCool = true, .name = "rizzmobly" }, allocator);
+    try env.commit_txn(txn_id);
+
+    if (try db.getTyped(Person, txn, "name")) |person| {
+        defer person.deinit();
+        std.debug.print("Person: name = {s}, isCool = {}\n", .{ person.data.name, person.data.isCool });
+    }
 }
