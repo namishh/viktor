@@ -25,6 +25,7 @@ pub fn main() !void {
 
     const db_id = try env.open("testing_db");
     const db = try env.get_db(db_id);
+    try db.enableDiskStorage("asd", true);
 
     const txn_id = try env.begin_txn(.ReadWrite);
     const txn = try env.get_txn(txn_id);

@@ -14,9 +14,9 @@ todo
   - [ ] optional: maybe
     - [ ] memory mapping
 
-  - [ ] bug fixes
+  - [x] bug fixes
     - [x] fix the serialization code
-    - [ ] nothing being written to the file on commit
+    - [x] nothing being written to the file on commit
 
 [ ] hexcore
 [ ] server
