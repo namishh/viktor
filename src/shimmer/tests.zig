@@ -73,7 +73,7 @@ test "Value: signed integer types" {
     const allocator = gpa.allocator();
 
     {
-        const val = Value(i32){ .data = -123456789 };
+        const val = Value(i32){ .data = -123456789, .allocator = allocator };
         const bytes = try val.convertToBytes(&allocator);
         defer allocator.free(bytes);
         const restored = try Value(i32).fromBytes(bytes, allocator);
@@ -81,7 +81,7 @@ test "Value: signed integer types" {
     }
 
     {
-        const val = Value(i64){ .data = -9223372036854775807 };
+        const val = Value(i64){ .data = -9223372036854775807, .allocator = allocator };
         const bytes = try val.convertToBytes(&allocator);
         defer allocator.free(bytes);
         const restored = try Value(i64).fromBytes(bytes, allocator);
@@ -95,7 +95,7 @@ test "Value: unsigned integer types" {
     const allocator = gpa.allocator();
 
     {
-        const val = Value(u32){ .data = 4294967295 };
+        const val = Value(u32){ .data = 4294967295, .allocator = allocator };
         const bytes = try val.convertToBytes(&allocator);
         defer allocator.free(bytes);
         const restored = try Value(u32).fromBytes(bytes, allocator);
@@ -103,7 +103,7 @@ test "Value: unsigned integer types" {
     }
 
     {
-        const val = Value(u64){ .data = 18446744073709551615 };
+        const val = Value(u64){ .data = 18446744073709551615, .allocator = allocator };
         const bytes = try val.convertToBytes(&allocator);
         defer allocator.free(bytes);
         const restored = try Value(u64).fromBytes(bytes, allocator);
@@ -117,7 +117,7 @@ test "Value: float types" {
     const allocator = gpa.allocator();
 
     {
-        const val = Value(f32){ .data = 3.14159 };
+        const val = Value(f32){ .data = 3.14159, .allocator = allocator };
         const bytes = try val.convertToBytes(&allocator);
         defer allocator.free(bytes);
         const restored = try Value(f32).fromBytes(bytes, allocator);
@@ -125,7 +125,7 @@ test "Value: float types" {
     }
 
     {
-        const val = Value(f64){ .data = 2.718281828459045 };
+        const val = Value(f64){ .data = 2.718281828459045, .allocator = allocator };
         const bytes = try val.convertToBytes(&allocator);
         defer allocator.free(bytes);
         const restored = try Value(f64).fromBytes(bytes, allocator);
@@ -139,7 +139,7 @@ test "Value: boolean type" {
     const allocator = gpa.allocator();
 
     {
-        const val = Value(bool){ .data = true };
+        const val = Value(bool){ .data = true, .allocator = allocator };
         const bytes = try val.convertToBytes(&allocator);
         defer allocator.free(bytes);
         const restored = try Value(bool).fromBytes(bytes, allocator);
@@ -147,7 +147,7 @@ test "Value: boolean type" {
     }
 
     {
-        const val = Value(bool){ .data = false };
+        const val = Value(bool){ .data = false, .allocator = allocator };
         const bytes = try val.convertToBytes(&allocator);
         defer allocator.free(bytes);
         const restored = try Value(bool).fromBytes(bytes, allocator);
@@ -161,7 +161,7 @@ test "Value: array types" {
     const allocator = gpa.allocator();
 
     {
-        const val = Value([5]u8){ .data = [_]u8{ 1, 2, 3, 4, 5 } };
+        const val = Value([5]u8){ .data = [_]u8{ 1, 2, 3, 4, 5 }, .allocator = allocator };
         const bytes = try val.convertToBytes(&allocator);
         defer allocator.free(bytes);
         const restored = try Value([5]u8).fromBytes(bytes, allocator);
@@ -169,7 +169,7 @@ test "Value: array types" {
     }
 
     {
-        const val = Value([3]i32){ .data = [_]i32{ -1, 0, 1 } };
+        const val = Value([3]i32){ .data = [_]i32{ -1, 0, 1 }, .allocator = allocator };
         const bytes = try val.convertToBytes(&allocator);
         defer allocator.free(bytes);
         const restored = try Value([3]i32).fromBytes(bytes, allocator);

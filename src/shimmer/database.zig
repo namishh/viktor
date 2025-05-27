@@ -222,15 +222,60 @@ pub const Database = struct {
         return null;
     }
 
+    fn insertIntoPage(self: *Self, txn: *Transaction, page_id: u32, key: []const u8, value: []const u8) !void {
+        var page = self.pages.getPtr(page_id) orelse return DatabaseError.InvalidDatabase;
+
+        try self.lock_manager.lockPage(txn.id, page_id, .X);
+
+        if (page.header.is_leaf) {
+            if (!page.isFull()) {
+                try page.insert(&self.allocator, key, value);
+                try txn.dirty_pages.append(page_id);
+            } else {
+                const new_page_id = self.next_page_id;
+                self.next_page_id += 1;
+                var new_page = try page.split(self.allocator, new_page_id);
+                try self.pages.put(new_page_id, new_page);
+
+                if (std.mem.order(u8, key, page.keys[page.header.key_count - 1]) == .gt) {
+                    try new_page.insert(&self.allocator, key, value);
+                    try txn.dirty_pages.append(new_page_id);
+                } else {
+                    try page.insert(&self.allocator, key, value);
+                    try txn.dirty_pages.append(page_id);
+                }
+
+                const promoted_key = try self.allocator.dupe(u8, new_page.keys[0]);
+                if (page.header.is_root) {
+                    const new_root_id = self.next_page_id;
+                    self.next_page_id += 1;
+                    var new_root = try Page.init(self.allocator, new_root_id, false);
+                    new_root.header.is_root = true;
+                    new_root.children[0] = page_id;
+                    new_root.children[1] = new_page_id;
+                    try new_root.insert(&self.allocator, promoted_key, "");
+                    self.root_page = new_root_id;
+                    try self.pages.put(new_root_id, new_root);
+                    page.header.is_root = false;
+                    page.header.parent_id = new_root_id;
+                    new_page.header.parent_id = new_root_id;
+                    try txn.dirty_pages.append(new_root_id);
+                } else {
+                    try self.insertIntoPage(txn, page.header.parent_id, promoted_key, "");
+                }
+            }
+        } else {
+            const pos = page.findInsertPosition(key);
+            const child_id = page.children[pos];
+            try self.insertIntoPage(txn, child_id, key, value);
+        }
+    }
+
     pub fn put(self: *Self, txn: *Transaction, key: []const u8, value: []const u8) !void {
         if (!txn.is_active) return DatabaseError.InvalidTransaction;
         if (txn.txn_type == .ReadOnly) return DatabaseError.InvalidTransaction;
 
-        var root_page = self.pages.getPtr(self.root_page) orelse return DatabaseError.InvalidDatabase;
-
-        if (self.immutable and root_page.search(key) != null) {
-            return DatabaseError.KeyExists;
-        }
+        const root_page = self.pages.getPtr(self.root_page) orelse return DatabaseError.InvalidDatabase;
 
         const existing_value = if (root_page.search(key)) |idx|
             try self.allocator.dupe(u8, root_page.values[idx])
@@ -253,9 +298,7 @@ pub const Database = struct {
             });
         }
 
-        try root_page.insert(&self.allocator, key, value);
-        try txn.dirty_pages.append(self.root_page);
-        try self.lock_manager.lockPage(txn.id, self.root_page, .X);
+        try self.insertIntoPage(txn, self.root_page, key, value);
     }
 
     pub fn putTyped(self: *Self, comptime T: type, txn: *Transaction, key: []const u8, value: T, allocator: std.mem.Allocator) !void {
@@ -263,6 +306,80 @@ pub const Database = struct {
         const bytes = try value_wrapper.convertToBytes(&allocator);
         defer allocator.free(bytes);
         try self.put(txn, key, bytes);
+    }
+
+    fn deleteFromPage(self: *Self, txn: *Transaction, page_id: u32, key: []const u8) !void {
+        var page = self.pages.getPtr(page_id) orelse return DatabaseError.InvalidDatabase;
+
+        try self.lock_manager.lockPage(txn.id, page_id, .X);
+
+        if (page.header.is_leaf) {
+            if (page.search(key)) |_| {
+                try page.remove(self.allocator, key);
+                try txn.dirty_pages.append(page_id);
+
+                if (page.isUnderflow() and !page.header.is_root) {
+                    var parent = self.pages.getPtr(page.header.parent_id) orelse return DatabaseError.InvalidDatabase;
+                    var sibling_id: ?u32 = null;
+                    var sibling_pos: ?usize = null;
+                    var separator_pos: usize = 0;
+
+                    for (parent.children[0 .. parent.header.key_count + 1], 0..) |child_id, i| {
+                        if (child_id == page_id) {
+                            if (i > 0) {
+                                sibling_id = parent.children[i - 1];
+                                separator_pos = i - 1;
+                            } else if (i < parent.header.key_count) {
+                                sibling_id = parent.children[i + 1];
+                                separator_pos = i;
+                            }
+                            sibling_pos = i;
+                            break;
+                        }
+                    }
+
+                    if (sibling_id) |sid| {
+                        var sibling = self.pages.getPtr(sid) orelse return DatabaseError.InvalidDatabase;
+                        const separator_key = parent.keys[separator_pos];
+
+                        if (sibling.canLendKey()) {
+                            const new_separator = if (sibling_pos.? > 0)
+                                try page.redistributeFromLeft(self.allocator, sibling, separator_key)
+                            else
+                                try page.redistributeFromRight(self.allocator, sibling, separator_key);
+                            self.allocator.free(parent.keys[separator_pos]);
+                            parent.keys[separator_pos] = new_separator;
+                            try txn.dirty_pages.append(sid);
+                            try txn.dirty_pages.append(parent.header.page_id);
+                        } else {
+                            if (sibling_pos.? > 0) {
+                                try sibling.merge(self.allocator, page, separator_key);
+                                parent.children[sibling_pos.?] = sid;
+                            } else {
+                                try page.merge(self.allocator, sibling, separator_key);
+                            }
+                            self.allocator.free(parent.keys[separator_pos]);
+                            for (separator_pos..parent.header.key_count - 1) |i| {
+                                parent.keys[i] = parent.keys[i + 1];
+                                parent.children[i + 1] = parent.children[i + 2];
+                            }
+                            parent.header.key_count -= 1;
+                            try txn.dirty_pages.append(parent.header.page_id);
+
+                            if (parent.isUnderflow()) {
+                                try self.deleteFromPage(txn, parent.header.parent_id, separator_key);
+                            }
+                        }
+                    }
+                }
+            } else {
+                return DatabaseError.NotFound;
+            }
+        } else {
+            const pos = page.findInsertPosition(key);
+            const child_id = page.children[pos];
+            try self.deleteFromPage(txn, child_id, key);
+        }
     }
 
     pub fn delete(self: *Self, txn: *Transaction, key: []const u8) !void {
@@ -279,11 +396,9 @@ pub const Database = struct {
                 .old_value = try self.allocator.dupe(u8, root_page.values[index]),
             });
 
-            try root_page.remove(self.allocator, key);
-            try txn.dirty_pages.append(self.root_page);
+            try self.deleteFromPage(txn, self.root_page, key);
         } else {
             return DatabaseError.NotFound;
         }
-        try self.lock_manager.lockPage(txn.id, self.root_page, .X);
     }
 };

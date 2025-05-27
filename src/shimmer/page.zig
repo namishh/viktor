@@ -77,7 +77,7 @@ pub const Page = struct {
         return null;
     }
 
-    fn findInsertPosition(self: *const Self, key: []const u8) usize {
+    pub fn findInsertPosition(self: *const Self, key: []const u8) usize {
         var pos: usize = 0;
         while (pos < self.header.key_count) {
             const cmp = std.mem.order(u8, self.keys[pos], key);
@@ -87,15 +87,15 @@ pub const Page = struct {
         return pos;
     }
 
-    fn isFull(self: *const Self) bool {
+    pub fn isFull(self: *const Self) bool {
         return self.header.key_count >= MAX_KEYS_PER_PAGE;
     }
 
-    fn isUnderflow(self: *const Self) bool {
+    pub fn isUnderflow(self: *const Self) bool {
         return self.header.key_count < MIN_KEYS and !self.header.is_root;
     }
 
-    fn canLendKey(self: *const Self) bool {
+    pub fn canLendKey(self: *const Self) bool {
         return self.header.key_count > MIN_KEYS;
     }
 
@@ -142,7 +142,7 @@ pub const Page = struct {
         }
     }
 
-    fn split(self: *Self, allocator: std.mem.Allocator, new_page_id: u32) !Self {
+    pub fn split(self: *Self, allocator: std.mem.Allocator, new_page_id: u32) !Self {
         const mid = self.header.key_count / 2;
         var new_page = try Self.init(allocator, new_page_id, self.header.is_leaf);
 
@@ -171,7 +171,7 @@ pub const Page = struct {
         return new_page;
     }
 
-    fn merge(self: *Self, allocator: std.mem.Allocator, sibling: *Self, separator_key: []const u8) !void {
+    pub fn merge(self: *Self, allocator: std.mem.Allocator, sibling: *Self, separator_key: []const u8) !void {
         if (!self.header.is_leaf) {
             self.keys[self.header.key_count] = try allocator.dupe(u8, separator_key);
             self.values[self.header.key_count] = try allocator.dupe(u8, "");
@@ -196,7 +196,7 @@ pub const Page = struct {
         }
     }
 
-    fn redistributeFromLeft(self: *Self, allocator: std.mem.Allocator, left_sibling: *Self, separator_key: []const u8) ![]const u8 {
+    pub fn redistributeFromLeft(self: *Self, allocator: std.mem.Allocator, left_sibling: *Self, separator_key: []const u8) ![]const u8 {
         var i = self.header.key_count;
         while (i > 0) {
             self.keys[i] = self.keys[i - 1];
@@ -229,7 +229,7 @@ pub const Page = struct {
         return try allocator.dupe(u8, left_sibling.keys[left_sibling.header.key_count - 1]);
     }
 
-    fn redistributeFromRight(self: *Self, allocator: std.mem.Allocator, right_sibling: *Self, separator_key: []const u8) ![]const u8 {
+    pub fn redistributeFromRight(self: *Self, allocator: std.mem.Allocator, right_sibling: *Self, separator_key: []const u8) ![]const u8 {
         if (self.header.is_leaf) {
             self.keys[self.header.key_count] = right_sibling.keys[0];
             self.values[self.header.key_count] = right_sibling.values[0];
