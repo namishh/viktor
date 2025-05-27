@@ -26,15 +26,17 @@ pub fn main() !void {
     const db_id = try env.open("testing_db");
     const db = try env.get_db(db_id);
     try db.enableDiskStorage("asd", true);
+    db.setImmutable(false);
 
     const txn_id = try env.begin_txn(.ReadWrite);
     const txn = try env.get_txn(txn_id);
 
-    try db.putTyped(Person, txn, "name", Person{ .isCool = true, .name = "rizzmobly" }, allocator);
-    try env.commit_txn(txn_id);
+    try db.putTyped(Person, txn, "candidate_2", Person{ .isCool = true, .name = "rizzmobly" }, allocator);
 
-    if (try db.getTyped(Person, txn, "name")) |person| {
+    if (try db.getTyped(Person, txn, "candidate_2")) |person| {
         defer person.deinit();
         std.debug.print("Person: name = {s}, isCool = {}\n", .{ person.data.name, person.data.isCool });
     }
+
+    try env.commit_txn(txn_id);
 }

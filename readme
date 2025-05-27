@@ -11,8 +11,6 @@ todo
   - [x] make immutablility opt in
   - [ ] document the code from the perpsective of education
   - [x] page splitting and more performance optimizations
-  - [ ] optional: maybe
-    - [ ] memory mapping
 
   - [x] bug fixes
     - [x] fix the serialization code

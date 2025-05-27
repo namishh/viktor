@@ -916,6 +916,7 @@ pub const Database = struct {
     }
 
     pub fn getTyped(self: *Self, comptime T: type, txn: *Transaction, key: []const u8) !?Value(T) {
+        if (!txn.is_active or txn.state != .Active) return DatabaseError.InvalidTransaction;
         if (txn.txn_type == .WriteOnly) return DatabaseError.InvalidTransaction;
 
         const value = try self.get(txn, key);
