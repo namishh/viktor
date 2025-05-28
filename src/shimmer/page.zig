@@ -2,8 +2,29 @@ const std = @import("std");
 const DatabaseError = @import("errors.zig").DatabaseError;
 const Value = @import("value.zig").Value;
 
+// each page can hold a maximum of 1024 keys, and each page is 64KB in size.
 pub const MAX_KEYS_PER_PAGE = 1024;
 pub const PAGE_SIZE = 64 * 1024;
+
+// B Tree is the core data structure for retrieving and storing in this key-value store.
+// page.zig is the core implementation of a B-Tree, and the higher level operations are in database.zig.
+
+// BASIC PROPERTIES OF A B-TREE:
+// 1. All leaf nodes are at the same height.
+// 2. Internal (non-leaf) nodes store keys and pointers to child nodes
+// 3. Keys in each node are sorted in ascending order
+// 4. For any internal node, all keys in the subtree rooted at child[i] are less than the key at position i
+// 5. For any internal node, all keys in the subtree rooted at child[i+1] are greater than or equal to the key at position i
+
+// PageHeader contains the metadata for a page in the B-Tree.
+// page_id: unique identifier for the page.
+// parent_id: identifier of the parent page, if any. for root page, this is 0.
+// is_leaf: indicates if the page is a leaf page (contains actual key-value pairs) or an internal page (contains keys and child pointers).
+// key_count: number of keys currently stored in the page.
+// prev: identifier of the previous page in the linked list of pages.
+// next: identifier of the next page in the linked list of pages.
+// is_root: indicates if the page is the root page of the B-Tree.
+// height: the height of the page in the B-Tree, used for balancing and traversal. 0 for leaf nodes.
 
 const PageHeader = struct {
     page_id: u32,
@@ -16,6 +37,12 @@ const PageHeader = struct {
     height: u32 = 0,
 };
 
+// Page represents a single node in the B-Tree.
+// header: metadata for the page.
+// keys: array of keys stored in the page.
+// values: array of values corresponding to the keys, only used for leaf pages.
+// children: array of child page identifiers, only used for internal pages.
+
 pub const Page = struct {
     header: PageHeader,
     keys: [][]const u8,
@@ -24,6 +51,12 @@ pub const Page = struct {
 
     const Self = @This();
     const MIN_KEYS = MAX_KEYS_PER_PAGE / 2;
+
+    // this function initializes a new page
+    // it takes in
+    // - allocator: the memory allocator to use for allocating the page's keys, values, and children arrays.
+    // - page_id: the unique identifier for the page.
+    // - is_leaf: a boolean indicating if the page is a leaf page.
 
     pub fn init(allocator: std.mem.Allocator, page_id: u32, is_leaf: bool) !Self {
         const keys = try allocator.alloc([]const u8, MAX_KEYS_PER_PAGE);
@@ -47,6 +80,8 @@ pub const Page = struct {
         };
     }
 
+    // deinit function frees the memory allocated for the page's keys, values, and children arrays.
+    // it only takes in the allocator
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
         for (self.keys[0..self.header.key_count]) |key| {
             allocator.free(key);
@@ -60,6 +95,43 @@ pub const Page = struct {
         allocator.free(self.children);
     }
 
+    // CAPACITY AND STATE CHECKS
+
+    // it returns true if the key_count is greater than or equal to MAX_KEYS_PER_PAGE.
+    pub fn isFull(self: *const Self) bool {
+        return self.header.key_count >= MAX_KEYS_PER_PAGE;
+    }
+
+    // it returns true if the key_count is less than MIN_KEYS and the page is not the root.
+    pub fn isUnderflow(self: *const Self) bool {
+        return self.header.key_count < MIN_KEYS and !self.header.is_root;
+    }
+
+    // it returns true if the key_count is greater than MIN_KEYS.
+    pub fn canLendKey(self: *const Self) bool {
+        return self.header.key_count > MIN_KEYS;
+    }
+
+    // TODO: can it be made more efficient?
+    // this function determines where the key should be inserted in the keys array. it scans the keys array linearly to find the
+    // first position where the existing key is greater than the new key.
+    // it takes in the key to insert
+    // returns the position where the key should be inserted.
+    pub fn findInsertPosition(self: *const Self, key: []const u8) usize {
+        var pos: usize = 0;
+        while (pos < self.header.key_count) {
+            const cmp = std.mem.order(u8, self.keys[pos], key);
+            if (cmp == .gt) break;
+            pos += 1;
+        }
+        return pos;
+    }
+
+    // B TREE OPERATIONS
+
+    // performs basic binary search on the keys array to find the index of the key.
+    // it takes in the key to search
+    // returns the index of the key if found, or null if not found.
     pub fn search(self: *const Self, key: []const u8) ?usize {
         var left: usize = 0;
         var right: usize = self.header.key_count;
@@ -77,28 +149,14 @@ pub const Page = struct {
         return null;
     }
 
-    pub fn findInsertPosition(self: *const Self, key: []const u8) usize {
-        var pos: usize = 0;
-        while (pos < self.header.key_count) {
-            const cmp = std.mem.order(u8, self.keys[pos], key);
-            if (cmp == .gt) break;
-            pos += 1;
-        }
-        return pos;
-    }
-
-    pub fn isFull(self: *const Self) bool {
-        return self.header.key_count >= MAX_KEYS_PER_PAGE;
-    }
-
-    pub fn isUnderflow(self: *const Self) bool {
-        return self.header.key_count < MIN_KEYS and !self.header.is_root;
-    }
-
-    pub fn canLendKey(self: *const Self) bool {
-        return self.header.key_count > MIN_KEYS;
-    }
-
+    // this function inserts a key-value pair into the page.
+    // if the key already exists, it updates the value by freeing the old value and duplicating the new value.
+    // if not, it shifts the existing keys and values to make space for the new key-value pair.
+    // it takes in
+    // - allocator: the memory allocator to use for allocating the new key and value.
+    // - key: the key to insert.
+    // - value: the value to insert.
+    // it returns an error if the page is full.
     pub fn insert(self: *Self, allocator: *std.mem.Allocator, key: []const u8, value: []const u8) !void {
         if (self.search(key)) |index| {
             allocator.free(self.values[index]);
@@ -123,6 +181,11 @@ pub const Page = struct {
         }
     }
 
+    // this function removes a key from the page. if the key exists, it frees the memory allocated for the key and value and
+    // shifts the existing keys and values to fill the gap.
+    // it takes in
+    // - allocator: the memory allocator to use for freeing the key and value.
+    // - key: the key to remove.
     pub fn remove(self: *Self, allocator: std.mem.Allocator, key: []const u8) !void {
         if (self.search(key)) |index| {
             allocator.free(self.keys[index]);
@@ -141,6 +204,8 @@ pub const Page = struct {
             self.header.key_count -= 1;
         }
     }
+
+    // B TREE OPTIMIZATIONS
 
     pub fn split(self: *Self, allocator: std.mem.Allocator, new_page_id: u32) !Self {
         const mid = self.header.key_count / 2;
