@@ -17,15 +17,14 @@ pub const PAGE_SIZE = 64 * 1024;
 // 5. For any internal node, all keys in the subtree rooted at child[i+1] are greater than or equal to the key at position i
 
 // PageHeader contains the metadata for a page in the B-Tree.
-// page_id: unique identifier for the page.
-// parent_id: identifier of the parent page, if any. for root page, this is 0.
-// is_leaf: indicates if the page is a leaf page (contains actual key-value pairs) or an internal page (contains keys and child pointers).
-// key_count: number of keys currently stored in the page.
-// prev: identifier of the previous page in the linked list of pages.
-// next: identifier of the next page in the linked list of pages.
-// is_root: indicates if the page is the root page of the B-Tree.
-// height: the height of the page in the B-Tree, used for balancing and traversal. 0 for leaf nodes.
-
+//      page_id: unique identifier for the page.
+//      parent_id: identifier of the parent page, if any. for root page, this is 0.
+//      is_leaf: indicates if the page is a leaf page (contains actual key-value pairs) or an internal page (contains keys and child pointers).
+//      key_count: number of keys currently stored in the page.
+//      prev: identifier of the previous page in the linked list of pages.
+//      next: identifier of the next page in the linked list of pages.
+//      is_root: indicates if the page is the root page of the B-Tree.
+//      height: the height of the page in the B-Tree, used for balancing and traversal. 0 for leaf nodes.
 const PageHeader = struct {
     page_id: u32,
     parent_id: u32,
@@ -38,10 +37,10 @@ const PageHeader = struct {
 };
 
 // Page represents a single node in the B-Tree.
-// header: metadata for the page.
-// keys: array of keys stored in the page.
-// values: array of values corresponding to the keys, only used for leaf pages.
-// children: array of child page identifiers, only used for internal pages.
+//      header: metadata for the page.
+//      keys: array of keys stored in the page.
+//      values: array of values corresponding to the keys, only used for leaf pages.
+//      children: array of child page identifiers, only used for internal pages.
 
 pub const Page = struct {
     header: PageHeader,
