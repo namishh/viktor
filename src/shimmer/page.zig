@@ -207,6 +207,14 @@ pub const Page = struct {
 
     // B TREE OPTIMIZATIONS
 
+    // when a page becomes full, it needs to be split into two pages. this function splits it at the midpoint, creating a new page that
+    // takes upper half of the keys and values, and returns the new page.
+    // for non-leaf pages, it also copies the child pointers to the new page.
+    // for leaf pages, it updates the next and previous pointers to maintain the linked list of leaf pages.
+    // it takes in
+    // - allocator: the memory allocator to use for allocating the new page.
+    // - new_page_id: the unique identifier for the new page.
+    // it returns the new page if the split is successful
     pub fn split(self: *Self, allocator: std.mem.Allocator, new_page_id: u32) !Self {
         const mid = self.header.key_count / 2;
         var new_page = try Self.init(allocator, new_page_id, self.header.is_leaf);
@@ -236,6 +244,14 @@ pub const Page = struct {
         return new_page;
     }
 
+    // when the page has too few keys, after deleteion, it may need to be merged with a sibling page.
+    // for leaf pages, merges the current page with a sibling page, copying the keys and values from the sibling page.
+    // for non-leaf pages, it includes the separator key from the parent page to maintain the B-Tree properties.
+    // it takes in
+    // - allocator: the memory allocator to use for allocating the new keys and values.
+    // - sibling: the sibling page to merge with.
+    // - separator_key: the key from the parent page that separates the two pages.
+    // it returns an error if the merge is unsuccessful.
     pub fn merge(self: *Self, allocator: std.mem.Allocator, sibling: *Self, separator_key: []const u8) !void {
         if (!self.header.is_leaf) {
             self.keys[self.header.key_count] = try allocator.dupe(u8, separator_key);
@@ -261,6 +277,13 @@ pub const Page = struct {
         }
     }
 
+    // KEY REDISTRIBUTION -> when a page has too few keys but its siblings have more than the minimum, keys can be
+    // redistributed rather than merging pages
+
+    // this function redistributes a key from the left sibling to the current page.
+    // it shifts the existing keys and values to make space for the new key, and updates the header's key count.
+    // for leaf pages, it takes the last key from the left sibling.
+    // for non leaf, it takes a separator key from the parent moves the rightmost child pointer from the left sibling.
     pub fn redistributeFromLeft(self: *Self, allocator: std.mem.Allocator, left_sibling: *Self, separator_key: []const u8) ![]const u8 {
         var i = self.header.key_count;
         while (i > 0) {
@@ -294,6 +317,10 @@ pub const Page = struct {
         return try allocator.dupe(u8, left_sibling.keys[left_sibling.header.key_count - 1]);
     }
 
+    // this function redistributes a key from the right sibling to the current page.
+    // it shifts the existing keys and values to make space for the new key, and updates the header's key count.
+    // for leaf pages, it takes the first key from the right sibling.
+    // for non leaf, it takes a separator key from the parent moves the leftmost child pointer from the right sibling.
     pub fn redistributeFromRight(self: *Self, allocator: std.mem.Allocator, right_sibling: *Self, separator_key: []const u8) ![]const u8 {
         if (self.header.is_leaf) {
             self.keys[self.header.key_count] = right_sibling.keys[0];
