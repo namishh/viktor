@@ -10,7 +10,21 @@ todo
   - [x] better serialization of Value type
   - [x] make immutablility opt in
   - [ ] document the code from the perpsective of education
+    - [x] value
+    - [x] page
+    - [x] transaction
+    - [x] lock
+    - [ ] env
+    - [ ] database
   - [x] page splitting and more performance optimizations
+
+  - [ ] improvements
+    - [ ] implement flushing and aborting in transactions.zig directly
+    - [ ] avoiding duplicating the data in value.zig -> convertToBytes
+    - [ ] memory mapping instead of reading/writing to file
+    - [ ] time the tests
+    - [ ] implement an actual graph structure for deadlock detection instead of hashmap
+    - [ ] avoid lienar search for finding insert position in page.zig
 
   - [x] bug fixes
     - [x] fix the serialization code
