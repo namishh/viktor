@@ -9,13 +9,11 @@ todo
   - [x] isolate keyval and processing into seperate modules
   - [x] better serialization of Value type
   - [x] make immutablility opt in
-  - [ ] document the code from the perpsective of education
+  - [x] document the code from the perpsective of education
     - [x] value
     - [x] page
     - [x] transaction
     - [x] lock
-    - [ ] env
-    - [ ] database
   - [x] page splitting and more performance optimizations
 
   - [ ] improvements

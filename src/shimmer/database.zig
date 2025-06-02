@@ -6,12 +6,6 @@ const LockManager = @import("locking.zig").LockManager;
 const Transaction = @import("transaction.zig").Transaction;
 const UndoEntry = @import("transaction.zig").UndoEntry;
 
-pub const DiskConfig = struct {
-    enabled: bool = false,
-    file_path: ?[]const u8 = null,
-    sync_on_commit: bool = true,
-};
-
 const SerializedPage = struct {
     page_id: u32,
     parent_id: u32,
@@ -38,7 +32,8 @@ pub const Database = struct {
     pages: std.HashMap(u32, Page, std.hash_map.AutoContext(u32), std.hash_map.default_max_load_percentage),
     next_page_id: u32,
     immutable: bool = true,
-    disk_config: DiskConfig = .{},
+    sync_on_commit: bool = true,
+    file_path: []const u8,
     lock_manager: LockManager,
     allocator: std.mem.Allocator,
 
@@ -56,23 +51,26 @@ pub const Database = struct {
 
         const lm = LockManager.init(allocator);
 
-        return Self{
+        var db = Self{
             .id = id,
             .name = try allocator.dupe(u8, name),
             .root_page = 1,
+            .file_path = try allocator.dupe(u8, name),
             .pages = pages,
             .next_page_id = 2,
             .lock_manager = lm,
             .allocator = allocator,
         };
+
+        try loadFromDisk(&db);
+
+        return db;
     }
 
     pub fn deinit(self: *Self) void {
         self.allocator.free(self.name);
 
-        if (self.disk_config.file_path) |path| {
-            self.allocator.free(path);
-        }
+        self.allocator.free(self.file_path);
 
         var page_iter = self.pages.iterator();
         while (page_iter.next()) |entry| {
@@ -84,21 +82,8 @@ pub const Database = struct {
         self.pages.deinit();
     }
 
-    pub fn enableDiskStorage(self: *Self, file_path: []const u8, sync_on_commit: bool) !void {
-        if (self.disk_config.enabled) return DatabaseError.InvalidDatabase;
-        self.disk_config = DiskConfig{
-            .enabled = true,
-            .file_path = try self.allocator.dupe(u8, file_path),
-            .sync_on_commit = sync_on_commit,
-        };
-
-        try self.loadFromDisk();
-    }
-
     pub fn saveToDisk(self: *Self) !void {
-        if (!self.disk_config.enabled or self.disk_config.file_path == null) return;
-
-        const file = std.fs.cwd().createFile(self.disk_config.file_path.?, .{}) catch {
+        const file = std.fs.cwd().createFile(self.file_path, .{}) catch {
             return DatabaseError.DiskWriteError;
         };
         defer file.close();
@@ -137,15 +122,13 @@ pub const Database = struct {
 
         try file.writeAll(bytes);
 
-        if (self.disk_config.sync_on_commit) {
+        if (self.sync_on_commit) {
             try file.sync();
         }
     }
 
     fn loadFromDisk(self: *Self) !void {
-        if (!self.disk_config.enabled or self.disk_config.file_path == null) return;
-
-        const file = std.fs.cwd().openFile(self.disk_config.file_path.?, .{}) catch {
+        const file = std.fs.cwd().openFile(self.file_path, .{}) catch {
             return;
         };
         defer file.close();

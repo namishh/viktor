@@ -5,6 +5,8 @@ const TransactionType = @import("transaction.zig").TransactionType;
 const Transaction = @import("transaction.zig").Transaction;
 const Page = @import("page.zig").Page;
 
+// the most simple file in the entirety of the shimmer module, just think of it is as an wrapper around the database and transaction structs
+
 pub const Environment = struct {
     databases: std.HashMap(u32, Database, std.hash_map.AutoContext(u32), std.hash_map.default_max_load_percentage),
     transactions: std.HashMap(u32, Transaction, std.hash_map.AutoContext(u32), std.hash_map.default_max_load_percentage),
@@ -73,9 +75,7 @@ pub const Environment = struct {
             var db_iter = self.databases.iterator();
             while (db_iter.next()) |entry| {
                 const db = entry.value_ptr;
-                if (db.disk_config.enabled) {
-                    try db.saveToDisk();
-                }
+                try db.saveToDisk();
             }
             break;
         }

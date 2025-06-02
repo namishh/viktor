@@ -25,7 +25,6 @@ pub fn main() !void {
 
     const db_id = try env.open("testing_db");
     const db = try env.get_db(db_id);
-    try db.enableDiskStorage("asd", true);
     db.setImmutable(false);
 
     const txn_id = try env.begin_txn(.ReadWrite);
