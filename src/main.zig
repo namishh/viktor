@@ -10,9 +10,9 @@ fn setupBag(allocator: std.mem.Allocator) !BagOfWords {
     return Bag;
 }
 
-pub const Person = struct {
-    name: []const u8,
-    isCool: bool,
+pub const Message = struct {
+    to: []const u8,
+    message: []const u8,
 };
 
 pub fn main() !void {
@@ -23,20 +23,20 @@ pub fn main() !void {
     var env = try shimmer.Environment.init(allocator);
     defer env.deinit();
 
-    env.set_time_logging(true, &.{ .Transaction, .Database, .Locking });
+    env.set_time_logging(true, &.{ .Transaction, .Database });
 
-    const db_id = try env.open("testing_db");
+    const db_id = try env.open("new_database.db");
     const db = try env.get_db(db_id);
     db.setImmutable(false);
 
     const txn_id = try env.begin_txn(.ReadWrite);
     const txn = try env.get_txn(txn_id);
 
-    try db.putTyped(Person, txn, "candidate_2", Person{ .isCool = true, .name = "rizzmobly" }, allocator);
+    try db.putTyped(Message, txn, "birthday_boy", Message{ .to = "@seatedro", .message = "happy birthday big bro" }, allocator);
 
-    if (try db.getTyped(Person, txn, "candidate_2")) |person| {
+    if (try db.getTyped(Message, txn, "birthday_boy")) |person| {
         defer person.deinit();
-        std.debug.print("Person: name = {s}, isCool = {}\n", .{ person.data.name, person.data.isCool });
+        std.debug.print("TO = {s}\nMESSAGE = {s}\n", .{ person.data.to, person.data.message });
     }
 
     try env.commit_txn(txn_id);

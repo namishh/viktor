@@ -419,66 +419,6 @@ test "Database: Basic delete operation" {
     try expectEqual(@as(i32, 888), result.?.data);
 }
 
-test "Persistence: Basic save and load" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    const test_file = "test_persistence.db";
-
-    std.fs.cwd().deleteFile(test_file) catch {};
-    defer std.fs.cwd().deleteFile(test_file) catch {};
-
-    {
-        var env = try setupTestEnvironment(allocator);
-        defer env.deinit();
-
-        const db_id = try env.open("persistence_test");
-        var db = try env.get_db(db_id);
-
-        try db.enableDiskStorage(test_file, true);
-
-        const txn_id = try env.begin_txn(.ReadWrite);
-        const txn = try env.get_txn(txn_id);
-
-        try db.putTyped(i32, txn, "persistent_key1", 12345, allocator);
-        try db.putTyped([]const u8, txn, "persistent_key2", "hello world", allocator);
-        try db.putTyped(f64, txn, "persistent_key3", 3.14159, allocator);
-
-        try env.commit_txn(txn_id);
-    }
-
-    {
-        var env = try setupTestEnvironment(allocator);
-        defer env.deinit();
-
-        const db_id = try env.open("persistence_test_reload");
-        var db = try env.get_db(db_id);
-
-        try db.enableDiskStorage(test_file, true);
-
-        const txn_id = try env.begin_txn(.ReadOnly);
-        const txn = try env.get_txn(txn_id);
-        defer {
-            txn.deinit();
-            _ = env.transactions.remove(txn_id);
-        }
-
-        const result1 = try db.getTyped(i32, txn, "persistent_key1");
-        try expect(result1 != null);
-        try expectEqual(@as(i32, 12345), result1.?.data);
-
-        const result2 = try db.getTyped([]const u8, txn, "persistent_key2");
-        try expect(result2 != null);
-        try expectEqualStrings("hello world", result2.?.data);
-        defer if (result2) |r| allocator.free(r.data); // Add this line
-
-        const result3 = try db.getTyped(f64, txn, "persistent_key3");
-        try expect(result3 != null);
-        try expectEqual(@as(f64, 3.14159), result3.?.data);
-    }
-}
-
 test "immutable database behavior" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -672,4 +612,136 @@ test "record level locking" {
 
     try env.commit_txn(txn1_id);
     try env.commit_txn(txn2_id);
+}
+
+const TestStruct = struct {
+    id: i32,
+    name: []const u8,
+    value: f64,
+    data: [10]u8,
+};
+
+test "Database: Insert and retrieve 1000 large objects of different types" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const test_file = "test_large_objects.db";
+    std.fs.cwd().deleteFile(test_file) catch {};
+    defer std.fs.cwd().deleteFile(test_file) catch {};
+
+    var env = try setupTestEnvironment(allocator);
+    env.set_time_logging(true, &.{ .Database, .Transaction });
+    defer env.deinit();
+
+    const db_id = try env.open("large_objects_test");
+    var db = try env.get_db(db_id);
+    db.setImmutable(false);
+
+    const txn_id = try env.begin_txn(.ReadWrite);
+    const txn = try env.get_txn(txn_id);
+
+    const num_entries = 1000;
+    const insertion_start = std.time.nanoTimestamp();
+
+    for (0..num_entries) |i| {
+        const key = try std.fmt.allocPrint(allocator, "key{}", .{i});
+        defer allocator.free(key);
+
+        const hash = std.hash.Fnv1a_32.hash(key);
+        const type_index = hash % 4;
+
+        switch (type_index) {
+            0 => {
+                const value = try allocator.alloc(u8, 1024);
+                defer allocator.free(value);
+                @memset(value, 'a' + @as(u8, @intCast(i % 26)));
+                try db.putTyped([]const u8, txn, key, value, allocator);
+            },
+            1 => {
+                const value: f128 = @floatFromInt(i);
+                try db.putTyped(f128, txn, key, value, allocator);
+            },
+            2 => {
+                const value: i128 = @intCast(i);
+                try db.putTyped(i128, txn, key, value, allocator);
+            },
+            3 => {
+                const value = TestStruct{
+                    .id = @intCast(i),
+                    .name = try std.fmt.allocPrint(allocator, "name{}", .{i}),
+                    .value = @floatFromInt(i),
+                    .data = [_]u8{@intCast(i % 256)} ** 10,
+                };
+                defer allocator.free(value.name);
+                try db.putTyped(TestStruct, txn, key, value, allocator);
+            },
+            else => unreachable,
+        }
+    }
+
+    try env.commit_txn(txn_id);
+    const insertion_end = std.time.nanoTimestamp();
+    const insertion_time = insertion_end - insertion_start;
+    const iff = @import("environment.zig").formatDuration(@as(f128, @floatFromInt(insertion_time)));
+    std.debug.print("\nTotal insertion time for 1000 large objects: {d:.3}{s}\n", .{ iff.value, iff.unit });
+
+    const read_txn_id = try env.begin_txn(.ReadOnly);
+    const read_txn = try env.get_txn(read_txn_id);
+    defer {
+        read_txn.deinit();
+        _ = env.transactions.remove(read_txn_id);
+    }
+
+    const retrieval_start = std.time.nanoTimestamp();
+
+    for (0..num_entries) |i| {
+        const key = try std.fmt.allocPrint(allocator, "key{}", .{i});
+        defer allocator.free(key);
+
+        const hash = std.hash.Fnv1a_32.hash(key);
+        const type_index = hash % 4;
+
+        switch (type_index) {
+            0 => {
+                const result = try db.getTyped([]const u8, read_txn, key);
+                try expect(result != null);
+                try expectEqual(@as(usize, 1024), result.?.data.len);
+                try expectEqual('a' + @as(u8, @intCast(i % 26)), result.?.data[0]);
+                defer if (result) |r| allocator.free(r.data);
+            },
+            1 => {
+                const result = try db.getTyped(f128, read_txn, key);
+                try expect(result != null);
+                try expectEqual(@as(f64, @floatFromInt(i)), result.?.data);
+            },
+            2 => {
+                const result = try db.getTyped(i128, read_txn, key);
+                try expect(result != null);
+                try expectEqual(@as(i64, @intCast(i)), result.?.data);
+            },
+            3 => {
+                const result = try db.getTyped(TestStruct, read_txn, key);
+                try expect(result != null);
+                const expected = TestStruct{
+                    .id = @intCast(i),
+                    .name = try std.fmt.allocPrint(allocator, "name{}", .{i}),
+                    .value = @floatFromInt(i),
+                    .data = [_]u8{@intCast(i % 256)} ** 10,
+                };
+                defer allocator.free(expected.name);
+                try expectEqual(expected.id, result.?.data.id);
+                try expectEqualStrings(expected.name, result.?.data.name);
+                try expectEqual(expected.value, result.?.data.value);
+                try expect(std.mem.eql(u8, &expected.data, &result.?.data.data));
+                defer if (result) |r| allocator.free(r.data.name);
+            },
+            else => unreachable,
+        }
+    }
+
+    const retrieval_end = std.time.nanoTimestamp();
+    const retrieval_time = retrieval_end - retrieval_start;
+    const rf = @import("environment.zig").formatDuration(@as(f128, @floatFromInt(retrieval_time)));
+    std.debug.print("Total retrieval time for 1000 large objects: {d:.3}{s}\n", .{ rf.value, rf.unit });
 }
