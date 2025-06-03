@@ -16,7 +16,7 @@ pub fn formatDuration(duration_ns: f128) struct { value: f128, unit: []const u8 
     if (abs_duration >= 1_000_000.0) {
         return .{ .value = abs_duration / 1_000_000.0, .unit = "ms" };
     } else if (abs_duration >= 1_000.0) {
-        return .{ .value = abs_duration / 1_000.0, .unit = "m(icro)s" };
+        return .{ .value = abs_duration / 1_000.0, .unit = "us" };
     } else {
         return .{ .value = abs_duration, .unit = "ns" };
     }
