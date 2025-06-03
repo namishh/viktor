@@ -20,7 +20,9 @@ todo
     - [ ] implement flushing and aborting in transactions.zig directly
     - [ ] avoiding duplicating the data in value.zig -> convertToBytes
     - [ ] memory mapping instead of reading/writing to file
-    - [ ] time the tests
+    - [x] time the tests
+    - [x] implement logging time
+    - [x] only expoee putTyped and getTyped in the public API, not put and get
     - [ ] implement an actual graph structure for deadlock detection instead of hashmap
     - [ ] avoid lienar search for finding insert position in page.zig
 

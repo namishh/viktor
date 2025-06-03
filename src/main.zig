@@ -23,6 +23,8 @@ pub fn main() !void {
     var env = try shimmer.Environment.init(allocator);
     defer env.deinit();
 
+    env.set_time_logging(true, &.{ .Transaction, .Database, .Locking });
+
     const db_id = try env.open("testing_db");
     const db = try env.get_db(db_id);
     db.setImmutable(false);

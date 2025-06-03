@@ -14,7 +14,9 @@ const expectError = testing.expectError;
 const expectEqualStrings = testing.expectEqualStrings;
 
 fn setupTestEnvironment(allocator: std.mem.Allocator) !Environment {
-    return try Environment.init(allocator);
+    var env = try Environment.init(allocator);
+    env.set_time_logging(true, &.{ .Database, .Transaction, .Locking });
+    return env;
 }
 
 test "Environment: Basic initialization and cleanup" {
@@ -68,116 +70,174 @@ test "Database: root page initialization" {
 }
 
 test "Value: signed integer types" {
+    const test_start = std.time.nanoTimestamp();
+
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     {
+        const start = std.time.nanoTimestamp();
         const val = Value(i32){ .data = -123456789, .allocator = allocator };
         const bytes = try val.convertToBytes(&allocator);
         defer allocator.free(bytes);
         const restored = try Value(i32).fromBytes(bytes, allocator);
+        const duration = std.time.nanoTimestamp() - start;
+        std.debug.print("Time taken for i32 conversion: {} ns\n", .{duration});
         try expectEqual(@as(i32, -123456789), restored.data);
     }
 
     {
+        const start = std.time.nanoTimestamp();
         const val = Value(i64){ .data = -9223372036854775807, .allocator = allocator };
         const bytes = try val.convertToBytes(&allocator);
         defer allocator.free(bytes);
         const restored = try Value(i64).fromBytes(bytes, allocator);
+        const duration = std.time.nanoTimestamp() - start;
+        std.debug.print("Time taken for i64 conversion: {} ns\n", .{duration});
         try expectEqual(@as(i64, -9223372036854775807), restored.data);
     }
+
+    const test_end = std.time.nanoTimestamp();
+    const total_time = test_end - test_start;
+    std.debug.print("Total time for test: {} ns\n", .{total_time});
 }
 
 test "Value: unsigned integer types" {
+    const test_start = std.time.nanoTimestamp();
+
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     {
+        const start = std.time.nanoTimestamp();
         const val = Value(u32){ .data = 4294967295, .allocator = allocator };
         const bytes = try val.convertToBytes(&allocator);
         defer allocator.free(bytes);
         const restored = try Value(u32).fromBytes(bytes, allocator);
+        const duration = std.time.nanoTimestamp() - start;
+        std.debug.print("Time taken for u32 conversion: {} ns\n", .{duration});
         try expectEqual(@as(u32, 4294967295), restored.data);
     }
 
     {
+        const start = std.time.nanoTimestamp();
         const val = Value(u64){ .data = 18446744073709551615, .allocator = allocator };
         const bytes = try val.convertToBytes(&allocator);
         defer allocator.free(bytes);
         const restored = try Value(u64).fromBytes(bytes, allocator);
+        const duration = std.time.nanoTimestamp() - start;
+        std.debug.print("Time taken for u64 conversion: {} ns\n", .{duration});
         try expectEqual(@as(u64, 18446744073709551615), restored.data);
     }
+
+    const test_end = std.time.nanoTimestamp();
+    const total_time = test_end - test_start;
+    std.debug.print("Total time for test: {} ns\n", .{total_time});
 }
 
 test "Value: float types" {
+    const test_start = std.time.nanoTimestamp();
+
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     {
+        const start = std.time.nanoTimestamp();
         const val = Value(f32){ .data = 3.14159, .allocator = allocator };
         const bytes = try val.convertToBytes(&allocator);
         defer allocator.free(bytes);
         const restored = try Value(f32).fromBytes(bytes, allocator);
+        const duration = std.time.nanoTimestamp() - start;
+        std.debug.print("Time taken for f32 conversion: {} ns\n", .{duration});
         try expect(@abs(restored.data - 3.14159) < 0.0001);
     }
 
     {
+        const start = std.time.nanoTimestamp();
         const val = Value(f64){ .data = 2.718281828459045, .allocator = allocator };
         const bytes = try val.convertToBytes(&allocator);
         defer allocator.free(bytes);
         const restored = try Value(f64).fromBytes(bytes, allocator);
+        const duration = std.time.nanoTimestamp() - start;
+        std.debug.print("Time taken for f64 conversion: {} ns\n", .{duration});
         try expect(@abs(restored.data - 2.718281828459045) < 0.000000000001);
     }
+
+    const test_end = std.time.nanoTimestamp();
+    const total_time = test_end - test_start;
+    std.debug.print("Total time for test: {} ns\n", .{total_time});
 }
 
 test "Value: boolean type" {
+    const test_start = std.time.nanoTimestamp();
+
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     {
+        const start = std.time.nanoTimestamp();
         const val = Value(bool){ .data = true, .allocator = allocator };
         const bytes = try val.convertToBytes(&allocator);
         defer allocator.free(bytes);
         const restored = try Value(bool).fromBytes(bytes, allocator);
+        const duration = std.time.nanoTimestamp() - start;
+        std.debug.print("Time taken for bool true conversion: {} ns\n", .{duration});
         try expectEqual(true, restored.data);
     }
 
     {
+        const start = std.time.nanoTimestamp();
         const val = Value(bool){ .data = false, .allocator = allocator };
         const bytes = try val.convertToBytes(&allocator);
         defer allocator.free(bytes);
         const restored = try Value(bool).fromBytes(bytes, allocator);
+        const duration = std.time.nanoTimestamp() - start;
+        std.debug.print("Time taken for bool false conversion: {} ns\n", .{duration});
         try expectEqual(false, restored.data);
     }
+
+    const test_end = std.time.nanoTimestamp();
+    const total_time = test_end - test_start;
+    std.debug.print("Total time for test: {} ns\n", .{total_time});
 }
 
 test "Value: array types" {
+    const test_start = std.time.nanoTimestamp();
+
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     {
+        const start = std.time.nanoTimestamp();
         const val = Value([5]u8){ .data = [_]u8{ 1, 2, 3, 4, 5 }, .allocator = allocator };
         const bytes = try val.convertToBytes(&allocator);
         defer allocator.free(bytes);
         const restored = try Value([5]u8).fromBytes(bytes, allocator);
+        const duration = std.time.nanoTimestamp() - start;
+        std.debug.print("Time taken for [5]u8 conversion: {} ns\n", .{duration});
         try expect(std.mem.eql(u8, &val.data, &restored.data));
     }
 
     {
+        const start = std.time.nanoTimestamp();
         const val = Value([3]i32){ .data = [_]i32{ -1, 0, 1 }, .allocator = allocator };
         const bytes = try val.convertToBytes(&allocator);
         defer allocator.free(bytes);
         const restored = try Value([3]i32).fromBytes(bytes, allocator);
+        const duration = std.time.nanoTimestamp() - start;
+        std.debug.print("Time taken for [3]i32 conversion: {} ns\n", .{duration});
         try expect(std.mem.eql(i32, &val.data, &restored.data));
     }
-}
 
-// ACTUAL GOOD TESTS
+    const test_end = std.time.nanoTimestamp();
+    const total_time = test_end - test_start;
+    std.debug.print("Total time for test: {} ns\n", .{total_time});
+}
 
 test "Transaction: Basic commit flow" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -242,7 +302,6 @@ test "Transaction: WriteOnly transaction restrictions" {
 
     try db.putTyped(i32, wo_txn, "write_key", 789, allocator);
 
-    try expectError(DatabaseError.InvalidTransaction, db.get(wo_txn, "write_key"));
     try expectError(DatabaseError.InvalidTransaction, db.getTyped(i32, wo_txn, "write_key"));
 }
 
@@ -425,20 +484,21 @@ test "immutable database behavior" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var env = try Environment.init(allocator);
+    var env = try setupTestEnvironment(allocator);
     defer env.deinit();
 
     const db_id = try env.open("test_db");
     var db = try env.get_db(db_id);
+    db.setImmutable(true);
 
     // test 1: immutable database (default) should reject duplicate keys
     {
         const txn_id = try env.begin_txn(.ReadWrite);
         const txn = try env.get_txn(txn_id);
 
-        try db.put(txn, "key1", "value1");
+        try db.putTyped([]const u8, txn, "key1", "value1", allocator);
 
-        const result = db.put(txn, "key1", "value2");
+        const result = db.putTyped([]const u8, txn, "key1", "value2", allocator);
         try testing.expectError(DatabaseError.KeyExists, result);
 
         try env.commit_txn(txn_id);
@@ -451,13 +511,13 @@ test "immutable database behavior" {
         const txn_id = try env.begin_txn(.ReadWrite);
         const txn = try env.get_txn(txn_id);
 
-        try db.put(txn, "key2", "value2");
+        try db.putTyped([]const u8, txn, "key2", "value2", allocator);
+        try db.putTyped([]const u8, txn, "key2", "updated_value2", allocator);
 
-        try db.put(txn, "key2", "updated_value2");
-
-        const retrieved = try db.get(txn, "key2");
+        const retrieved = try db.getTyped([]const u8, txn, "key2");
         try testing.expect(retrieved != null);
-        try testing.expectEqualStrings("updated_value2", retrieved.?);
+        try testing.expectEqualStrings("updated_value2", retrieved.?.data);
+        defer if (retrieved) |r| allocator.free(r.data);
 
         try env.commit_txn(txn_id);
     }
@@ -469,9 +529,9 @@ test "immutable database behavior" {
         const txn_id = try env.begin_txn(.ReadWrite);
         const txn = try env.get_txn(txn_id);
 
-        try db.put(txn, "key3", "value3");
+        try db.putTyped([]const u8, txn, "key3", "value3", allocator);
 
-        const result = db.put(txn, "key3", "new_value3");
+        const result = db.putTyped([]const u8, txn, "key3", "new_value3", allocator);
         try testing.expectError(DatabaseError.KeyExists, result);
 
         try env.commit_txn(txn_id);

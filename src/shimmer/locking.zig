@@ -1,6 +1,9 @@
 const std = @import("std");
 const DatabaseError = @import("errors.zig").DatabaseError;
 
+const TimeLoggingCategory = @import("environment.zig").TimeLoggingCategory;
+const formatDuration = @import("environment.zig").formatDuration;
+
 pub const LockType = enum {
     Shared, // allows multiple transactions to read the resource simultaneously but prevents any transaction from modifying it
     Exclusive, // grants a transaction exclusive access to a resource,
@@ -165,15 +168,17 @@ pub const LockManager = struct {
     deadlock_detector: DeadlockDetector,
     mutex: std.Thread.Mutex = .{},
     allocator: std.mem.Allocator,
+    time_logging_categories: std.EnumSet(TimeLoggingCategory),
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator) Self {
+    pub fn init(allocator: std.mem.Allocator, time_logging_categories: std.EnumSet(TimeLoggingCategory)) Self {
         return Self{
             .lock_table = std.HashMap(u64, std.ArrayList(LockRequest), std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
             .transaction_locks = std.HashMap(u32, std.ArrayList(u64), std.hash_map.AutoContext(u32), std.hash_map.default_max_load_percentage).init(allocator),
             .deadlock_detector = DeadlockDetector.init(allocator),
             .allocator = allocator,
+            .time_logging_categories = time_logging_categories,
         };
     }
 
@@ -206,6 +211,16 @@ pub const LockManager = struct {
     // if the lock can be granted, marks the request as granted and adds it to the lock tables
     // if the lock cannot be granted, it checks for deadlocks using the deadlock detector
     pub fn acquireLock(self: *Self, txn_id: u32, resource_id: u64, resource_type: ResourceType, mode: LockMode, timeout_ms: u64) !void {
+        const start_time = std.time.nanoTimestamp();
+        defer {
+            if (self.time_logging_categories.contains(.Locking)) {
+                const end_time = std.time.nanoTimestamp();
+                const duration = formatDuration(@as(f128, @floatFromInt(end_time - start_time)));
+                @import("environment.zig").time_logging_mutex.lock();
+                defer @import("environment.zig").time_logging_mutex.unlock();
+                std.debug.print("TIME[LOCK]: acquire lock txn {} resource {}: {d:.3}{s}\n", .{ txn_id, resource_id, duration.value, duration.unit });
+            }
+        }
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -285,6 +300,16 @@ pub const LockManager = struct {
     // it processes the wait queue for the resource to see if any other transactions can be granted locks.
     // and removes the resource from the transaction's lock list.
     pub fn releaseLock(self: *Self, txn_id: u32, resource_id: u64) !void {
+        const start_time = std.time.nanoTimestamp();
+        defer {
+            if (self.time_logging_categories.contains(.Locking)) {
+                const end_time = std.time.nanoTimestamp();
+                const duration = formatDuration(@as(f128, @floatFromInt(end_time - start_time)));
+                @import("environment.zig").time_logging_mutex.lock();
+                defer @import("environment.zig").time_logging_mutex.unlock();
+                std.debug.print("TIME[LOCK]: release lock txn {} resource {}: {d:.3}{s}\n", .{ txn_id, resource_id, duration.value, duration.unit });
+            }
+        }
         self.mutex.lock();
         defer self.mutex.unlock();
 

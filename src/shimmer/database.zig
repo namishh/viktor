@@ -6,6 +6,9 @@ const LockManager = @import("locking.zig").LockManager;
 const Transaction = @import("transaction.zig").Transaction;
 const UndoEntry = @import("transaction.zig").UndoEntry;
 
+const TimeLoggingCategory = @import("environment.zig").TimeLoggingCategory;
+const formatDuration = @import("environment.zig").formatDuration;
+
 const SerializedPage = struct {
     page_id: u32,
     parent_id: u32,
@@ -36,6 +39,7 @@ pub const Database = struct {
     file_path: []const u8,
     lock_manager: LockManager,
     allocator: std.mem.Allocator,
+    time_logging_categories: std.EnumSet(TimeLoggingCategory),
 
     const Self = @This();
 
@@ -43,13 +47,24 @@ pub const Database = struct {
         self.immutable = immutable;
     }
 
-    pub fn init(allocator: std.mem.Allocator, id: u32, name: []const u8) !Self {
+    pub fn init(allocator: std.mem.Allocator, id: u32, name: []const u8, time_logging_categories: std.EnumSet(TimeLoggingCategory)) !Self {
+        const start_time = std.time.nanoTimestamp();
+        defer {
+            if (time_logging_categories.contains(.Database)) {
+                const end_time = std.time.nanoTimestamp();
+                @import("environment.zig").time_logging_mutex.lock();
+                defer @import("environment.zig").time_logging_mutex.unlock();
+                const duration_ns = @as(f128, @floatFromInt(end_time - start_time));
+                const formatted = formatDuration(duration_ns);
+                std.debug.print("TIME[DB]: initing database '{s}': {d:.3}{s}\n", .{ name, formatted.value, formatted.unit });
+            }
+        }
         var pages = std.HashMap(u32, Page, std.hash_map.AutoContext(u32), std.hash_map.default_max_load_percentage).init(allocator);
 
         const root_page = try Page.init(allocator, 1, true);
         try pages.put(1, root_page);
 
-        const lm = LockManager.init(allocator);
+        const lm = LockManager.init(allocator, time_logging_categories);
 
         var db = Self{
             .id = id,
@@ -58,6 +73,7 @@ pub const Database = struct {
             .file_path = try allocator.dupe(u8, name),
             .pages = pages,
             .next_page_id = 2,
+            .time_logging_categories = time_logging_categories,
             .lock_manager = lm,
             .allocator = allocator,
         };
@@ -182,7 +198,7 @@ pub const Database = struct {
         }
     }
 
-    pub fn get(self: *Self, txn: *Transaction, key: []const u8) !?[]const u8 {
+    fn get(self: *Self, txn: *Transaction, key: []const u8) !?[]const u8 {
         if (txn.txn_type == .WriteOnly) return DatabaseError.InvalidTransaction;
         const root_page = self.pages.get(self.root_page) orelse return DatabaseError.NotFound;
         if (root_page.search(key)) |index| {
@@ -194,6 +210,17 @@ pub const Database = struct {
     }
 
     pub fn getTyped(self: *Self, comptime T: type, txn: *Transaction, key: []const u8) !?Value(T) {
+        const start_time = std.time.nanoTimestamp();
+        defer {
+            if (self.time_logging_categories.contains(.Database)) {
+                const end_time = std.time.nanoTimestamp();
+                const duration_ns = @as(f128, @floatFromInt(end_time - start_time));
+                const formatted_duration = formatDuration(duration_ns);
+                @import("environment.zig").time_logging_mutex.lock();
+                defer @import("environment.zig").time_logging_mutex.unlock();
+                std.debug.print("TIME[DB]: get key '{s}': {d:.3}{s}\n", .{ key, formatted_duration.value, formatted_duration.unit });
+            }
+        }
         if (!txn.is_active or txn.state != .Active) return DatabaseError.InvalidTransaction;
         if (txn.txn_type == .WriteOnly) return DatabaseError.InvalidTransaction;
 
@@ -254,11 +281,17 @@ pub const Database = struct {
         }
     }
 
-    pub fn put(self: *Self, txn: *Transaction, key: []const u8, value: []const u8) !void {
+    fn put(self: *Self, txn: *Transaction, key: []const u8, value: []const u8) !void {
         if (!txn.is_active) return DatabaseError.InvalidTransaction;
         if (txn.txn_type == .ReadOnly) return DatabaseError.InvalidTransaction;
 
         const root_page = self.pages.getPtr(self.root_page) orelse return DatabaseError.InvalidDatabase;
+
+        if (self.immutable) {
+            if (root_page.search(key) != null) {
+                return DatabaseError.KeyExists;
+            }
+        }
 
         const existing_value = if (root_page.search(key)) |idx|
             try self.allocator.dupe(u8, root_page.values[idx])
@@ -285,6 +318,17 @@ pub const Database = struct {
     }
 
     pub fn putTyped(self: *Self, comptime T: type, txn: *Transaction, key: []const u8, value: T, allocator: std.mem.Allocator) !void {
+        const start_time = std.time.nanoTimestamp();
+        defer {
+            if (self.time_logging_categories.contains(.Database)) {
+                const end_time = std.time.nanoTimestamp();
+                const duration_ns = @as(f128, @floatFromInt(end_time - start_time));
+                const formatted_duration = formatDuration(duration_ns);
+                @import("environment.zig").time_logging_mutex.lock();
+                defer @import("environment.zig").time_logging_mutex.unlock();
+                std.debug.print("TIME[DB]: put key '{s}': {d:.3}{s}\n", .{ key, formatted_duration.value, formatted_duration.unit });
+            }
+        }
         const value_wrapper = Value(T){ .data = value, .allocator = allocator };
         const bytes = try value_wrapper.convertToBytes(&allocator);
         defer allocator.free(bytes);
@@ -366,6 +410,18 @@ pub const Database = struct {
     }
 
     pub fn delete(self: *Self, txn: *Transaction, key: []const u8) !void {
+        const start_time = std.time.nanoTimestamp();
+        defer {
+            if (self.time_logging_categories.contains(.Database)) {
+                const end_time = std.time.nanoTimestamp();
+                const duration_ns = @as(f128, @floatFromInt(end_time - start_time));
+                const formatted_duration = formatDuration(duration_ns);
+                @import("environment.zig").time_logging_mutex.lock();
+                defer @import("environment.zig").time_logging_mutex.unlock();
+                std.debug.print("TIME[DB]: delete key '{s}': {d:.3}{s}\n", .{ key, formatted_duration.value, formatted_duration.unit });
+            }
+        }
+
         if (!txn.is_active) return DatabaseError.InvalidTransaction;
         if (txn.txn_type == .ReadOnly) return DatabaseError.InvalidTransaction;
 
