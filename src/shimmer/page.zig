@@ -162,7 +162,7 @@ pub const Page = struct {
             self.values[index] = try allocator.dupe(u8, value);
         } else {
             if (self.isFull()) {
-                return error.PageFull;
+                return DatabaseError.PageFull;
             }
             const pos = self.findInsertPosition(key);
             var i = self.header.key_count;

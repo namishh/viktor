@@ -239,6 +239,49 @@ test "Value: array types" {
     std.debug.print("Total time for test: {} ns\n", .{total_time});
 }
 
+test "Value: struct type" {
+    const test_start = std.time.nanoTimestamp();
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const TestStruct2 = struct {
+        id: i32,
+        name: []const u8,
+        value: f64,
+        data: [10]u8,
+    };
+
+    {
+        const start = std.time.nanoTimestamp();
+        const val = Value(TestStruct2){
+            .data = TestStruct2{
+                .id = 42,
+                .name = "test_name",
+                .value = 3.14,
+                .data = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 },
+            },
+            .allocator = allocator,
+        };
+        const bytes = try val.convertToBytes(&allocator);
+        defer allocator.free(bytes);
+        const restored = try Value(TestStruct2).fromBytes(bytes, allocator);
+        defer restored.deinit();
+        const duration = std.time.nanoTimestamp() - start;
+        std.debug.print("Time taken for TestStruct conversion: {} ns\n", .{duration});
+
+        try expectEqual(42, restored.data.id);
+        try expectEqualStrings("test_name", restored.data.name);
+        try expectEqual(3.14, restored.data.value);
+        try expect(std.mem.eql(u8, &val.data.data, &restored.data.data));
+    }
+
+    const test_end = std.time.nanoTimestamp();
+    const total_time = test_end - test_start;
+    std.debug.print("Total time for TestStruct test: {} ns\n", .{total_time});
+}
+
 test "Transaction: Basic commit flow" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -621,14 +664,28 @@ const TestStruct = struct {
     data: [10]u8,
 };
 
+pub fn pathExists(path: []const u8) !bool {
+    const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+        if (err == error.FileNotFound) {
+            return false;
+        }
+        return err;
+    };
+    file.close();
+    return true;
+}
+
 test "Database: Insert and retrieve 1000 large objects of different types" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const test_file = "test_large_objects.db";
-    std.fs.cwd().deleteFile(test_file) catch {};
-    defer std.fs.cwd().deleteFile(test_file) catch {};
+    // delete any existing test database
+    const test_db_path = "large_objects_test";
+    const test_db_exists = try pathExists(test_db_path);
+    if (test_db_exists) {
+        try std.fs.cwd().deleteFile(test_db_path);
+    }
 
     var env = try setupTestEnvironment(allocator);
     env.set_time_logging(true, &.{ .Database, .Transaction });

@@ -1,1 +1,1 @@
-pub const DatabaseError = error{ KeyExists, NotFound, DiskWriteError, DeadlockDetected, LockTimeout, InvalidDataType, InvalidDatabase, InvalidTransaction, InvalidSize, TransactionNotActive, InvalidKey };
+pub const DatabaseError = error{ KeyExists, NotFound, DiskWriteError, DeadlockDetected, LockTimeout, InvalidDataType, InvalidDatabase, InvalidTransaction, InvalidSize, TransactionNotActive, InvalidKey, PageFull };
